@@ -91,20 +91,12 @@ def validate_gid(gid):
         raise TransitionError("Usa el GID completo: gid://shopify/DraftOrder/123 o gid://shopify/Order/123; no el número # del pedido.")
 
 
-async def inspect_state(shopify, gid):
-    validate_gid(gid)
-    node = (await shopify.graphql(STATE_QUERY, {"id": gid})).get("node")
-    if not node or node.get("id") != gid:
-        raise TransitionError("Pedido o borrador no disponible; comprueba el GID y los permisos de lectura.")
+def classify_state(node):
+    """Mismas reglas para filtrar candidatos y validar el comando individual."""
     if node.get("__typename") == "DraftOrder":
-        if node["status"] == "COMPLETED":
-            order_id = (node.get("order") or {}).get("id")
-            if not order_id or not order_id.startswith("gid://shopify/Order/"):
-                raise TransitionError("El borrador está completado pero no se pudo obtener el GID del pedido.")
-            return await inspect_state(shopify, order_id)
         if node["status"] not in {"OPEN", "INVOICE_SENT"}:
             raise TransitionError("Estado de borrador fuera del flujo de demostración.")
-        return node, "BORRADOR"
+        return "BORRADOR"
     if node.get("__typename") != "Order":
         raise TransitionError("El GID no corresponde a un pedido ni a un borrador.")
     if node["cancelledAt"] is not None:
@@ -112,15 +104,28 @@ async def inspect_state(shopify, gid):
     financial = node["displayFinancialStatus"]
     fulfillment = node["displayFulfillmentStatus"]
     if financial == "PAID" and fulfillment == "FULFILLED":
-        return node, "PREPARADO"
+        return "PREPARADO"
     if node["closed"]:
         raise TransitionError("Pedido cerrado fuera del estado final admitido.")
     if fulfillment == "UNFULFILLED":
         if financial == "PENDING":
-            return node, "CONFIRMADO"
+            return "CONFIRMADO"
         if financial == "PAID":
-            return node, "PAGADO"
+            return "PAGADO"
     raise TransitionError("Estado de pago/preparación fuera del flujo simple; no se modifican autorizaciones, parciales, reembolsos ni pedidos retenidos.")
+
+
+async def inspect_state(shopify, gid):
+    validate_gid(gid)
+    node = (await shopify.graphql(STATE_QUERY, {"id": gid})).get("node")
+    if not node or node.get("id") != gid:
+        raise TransitionError("Pedido o borrador no disponible; comprueba el GID y los permisos de lectura.")
+    if node.get("__typename") == "DraftOrder" and node["status"] == "COMPLETED":
+        order_id = (node.get("order") or {}).get("id")
+        if not order_id or not order_id.startswith("gid://shopify/Order/"):
+            raise TransitionError("El borrador está completado pero no se pudo obtener el GID del pedido.")
+        return await inspect_state(shopify, order_id)
+    return node, classify_state(node)
 
 
 async def mutate(shopify, query, variables, field):

@@ -348,6 +348,111 @@ se contrastaron con el plugin y la documentación oficial. La prueba de escritur
 contra la tienda real sigue pendiente; durante el desarrollo solo se simularon
 las respuestas y no se modificó ningún pedido remoto.
 
+## Filtrar y actualizar estados por lotes
+
+El comando individual `change_order.py` se mantiene. `batch_orders.py` añade dos
+pasos separados: listar candidatos por estado desde Shopify y procesar los GID
+seleccionados. Comparte `classify_state` y reutiliza `transition_order` para cada
+elemento, con las mismas mutations, validaciones y refresco de SQLite.
+
+### Listar candidatos y revisar sus GID
+
+Windows, desde la raíz del proyecto:
+
+```powershell
+.\.venv\Scripts\python batch_orders.py list BORRADOR --limit 5 --output lotes/borradores.json
+```
+
+Imprime el JSON completo por terminal y lo guarda en el archivo indicado, con
+los GID en la propiedad `gids`, tienda y estado. Los mensajes de resumen van a
+stderr para poder copiar el JSON de stdout. Cada vez que repites el listado con
+la misma ruta, reemplaza todo su contenido con la selección actual: no acumula
+GID ni exige otro nombre. Sin candidatos, `gids` queda vacío; si falla la consulta,
+conserva el archivo anterior. Abre el archivo con tu editor para revisarlo; puedes quitar
+GID de esa lista antes de ejecutarlos, conservando el resto de metadatos.
+Listar no modifica Shopify ni crea SQLite. También acepta los estados
+`CONFIRMADO`, `PAGADO`, `PREPARADO` y los aliases del comando individual.
+
+El filtro remoto de borradores incluye `OPEN` e `INVOICE_SENT`; para pedidos
+combina pago y preparación. Se comprueban además los campos devueltos con las
+mismas reglas locales para excluir cancelados o estados fuera del flujo.
+Consulta páginas de 100 candidatos sin una petición individual de estado por
+cada GID. El límite por defecto es 20 y se informa si puede haber más resultados;
+`--limit 0` recorre todas las páginas accesibles. Una selección no garantiza que
+todos sean procesables: el estado y los requisitos se vuelven a consultar al
+ejecutar, y un borrador con importe cero, por ejemplo, se rechazará entonces.
+
+### Ejecutar y encadenar los pasos
+
+Opcionalmente simula la confirmación de todos los seleccionados:
+
+```powershell
+.\.venv\Scripts\python batch_orders.py change CONFIRMADO --input lotes/borradores.json --output lotes/simulacion.json --dry-run
+```
+
+Después, para ejecutar el flujo real:
+
+```powershell
+.\.venv\Scripts\python batch_orders.py change CONFIRMADO --input lotes/borradores.json --output lotes/confirmados.json
+.\.venv\Scripts\python batch_orders.py change PAGADO --input lotes/confirmados.json --output lotes/pagados.json
+.\.venv\Scripts\python batch_orders.py change PREPARADO --input lotes/pagados.json --output lotes/preparados.json
+```
+
+Cada comando es independiente; revisa su resultado antes del siguiente. Al
+confirmar, `confirmados.json` contiene los GID nuevos de tipo `Order` para el pago.
+La propiedad `results` conserva la correspondencia `input_gid` -> `gid`, el estado
+y el resultado de cada intento. `gids` contiene solo los éxitos verificados en
+el estado de destino, incluidos los que ya estaban en él. Los fallidos quedan
+registrados para revisión y no pasan automáticamente al siguiente paso.
+
+También puedes empezar por los pedidos que ya están confirmados o pagados:
+
+Estos filtros son independientes y pueden seleccionar otros pedidos de la tienda.
+Para avanzar siempre los mismos, encadena los archivos de resultados del ejemplo
+anterior, sin volver a filtrar entre pasos.
+
+```powershell
+.\.venv\Scripts\python batch_orders.py list CONFIRMADO --limit 5 --output lotes/pendientes_pago.json
+.\.venv\Scripts\python batch_orders.py change PAGADO --input lotes/pendientes_pago.json --output lotes/pago_resultados.json
+.\.venv\Scripts\python batch_orders.py list PAGADO --limit 5 --output lotes/pendientes_preparacion.json
+.\.venv\Scripts\python batch_orders.py change PREPARADO --input lotes/pendientes_preparacion.json --output lotes/preparacion_resultados.json
+```
+
+En macOS/Linux sustituye `.\.venv\Scripts\python` por `.venv/bin/python`. No
+necesita FastAPI ni túnel. Los permisos y los efectos de pago/preparación son los
+mismos que en el comando individual; este lote tampoco añade condiciones de pago.
+
+### Resultados, interrupciones y límites
+
+- Procesa los elementos secuencialmente, con una pausa de 0,5 segundos entre GID,
+  configurable mediante `--delay`. Es una coordinación de operaciones individuales,
+  no una exportación Bulk ni una única mutation masiva; no promete una duración.
+- Si un pedido falla, registra el error y continúa con el siguiente. Estado,
+  canMarkAsPaid y disponibilidad del fulfillment se comprueban en el momento de
+  cada transición; una selección antigua no autoriza saltos ni retrocesos.
+- Guarda resultados tras cada elemento y reemplaza el JSON de forma atómica.
+  `complete=false` identifica una ejecución interrumpida; los GID que ya figuran
+  como éxito siguen disponibles. El último cambio remoto puede estar aplicado
+  aunque su resultado aún no se haya registrado. No existe rollback de todo el lote.
+- Para reintentar, usa el archivo de entrada original y **otro nombre de salida**.
+  Los pedidos que ya están en el estado solicitado no repiten mutations. Si alguno
+  avanzó más, se rechaza el retroceso y se registra el error.
+- Los listados actualizan el mismo archivo con contenido nuevo de forma atómica.
+  Los resultados de `change` requieren otro nombre y no se sobrescriben.
+  Rechaza otra tienda, GID inválidos,
+  combinaciones de estado/tipo de GID incorrectas y saltos de pasos. Deduplica GID.
+- `--dry-run` no modifica pedidos ni SQLite, pero sí escribe su informe. Sus
+  resultados no se aceptan como entrada para el siguiente paso real.
+- Salida 0: todos los intentos correctos (o una selección vacía); salida 1:
+  algún fallo o error de configuración/archivo; `Ctrl+C`: 130. Una pausa fija no
+  garantiza evitar límites de Shopify: errores de cuota se registran sin reintentar
+  automáticamente las mutations. Empieza con lotes pequeños y revisa los fallos.
+
+Los archivos de `lotes/` contienen identificadores operativos y se excluyen de
+Git. No se han ejecutado escrituras de lotes contra la tienda real. La selección
+se contrastó con las consultas oficiales de [borradores](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/draftOrders)
+y [pedidos](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders).
+
 ## Modelo y correspondencia con Shopify
 
 | Tabla.columna | Campo de Shopify |
@@ -405,7 +510,7 @@ sincronización con la tienda real. En macOS/Linux usa `.venv/bin/python`.
 Las bases locales y los archivos `.env` se excluyen de Git. No guardar tokens ni
 credenciales en el repositorio.
 
-Verificado localmente en Windows con Python 3.13: 71 pruebas, compatibilidad de
+Verificado localmente en Windows con Python 3.13: 88 pruebas, compatibilidad de
 dependencias con `pip check`, creación SQLite y arranque real de Uvicorn en una
 copia temporal de los archivos del proyecto. La prueba de arranque usa `.env`
 con credenciales ficticias y una ruta de base distinta para demostrar su carga;
@@ -423,6 +528,9 @@ de versiones nuevas y control de actualizaciones concurrentes del marcador.
 Las pruebas de escritura simulan el flujo completo, cambio de GID, permisos
 rechazados, saltos/retrocesos, repetición sin nuevas mutations, simulación sin
 escrituras, errores de red ambiguos y recuperación tras fallo de SQLite.
+Los lotes añaden pruebas de selección paginada, filtros compartidos, cambio de GID
+y encadenado de las tres transiciones, fallos parciales, revalidación remota,
+simulación sin escrituras, interrupción con salida parcial y validación de archivos.
 
 ## Prueba de aceptación con Shopify (Windows, macOS y Linux)
 

@@ -28,6 +28,10 @@ a pedido confirmado, pago registrado y preparación completa, consultando Shopif
 y refrescando SQLite. Rechaza retrocesos y saltos y ofrece simulación sin cambios.
 Este flujo de prueba requiere permisos de escritura y no representa todas las
 reglas comerciales de la tienda. Su validación remota está pendiente.
+La misma lógica se reutiliza en lotes: se listan y revisan GID por estado y
+después se aplica un único avance a esa selección. Los resultados conservan
+éxitos, fallos y nuevos identificadores para encadenar confirmación, pago y
+preparación. Cada elemento se revalida; no existe rollback global del lote.
 En la prueba manual se recibió un aviso real y el usuario confirmó la actualización.
 Se creó un pedido nuevo en Shopify; queda registrar su comprobación local y el
 resumen de importación. El README explica cómo reproducir y verificar ambos flujos

@@ -110,6 +110,36 @@ por error de red. El operador consulta primero y vuelve a ejecutar para recupera
 la copia local. Se recomienda un solo operador por pedido durante la
 prueba. Los permisos de escritura y las restricciones están en el README.
 
+## Selección y ejecución de lotes
+
+`batch_orders.py list ESTADO --output ARCHIVO [--limit N]` consulta `draftOrders`
+para borradores o `orders` para el resto, con filtros de búsqueda y páginas de 100.
+El límite por defecto es 20; 0 recorre todas las páginas. `classify_state`, compartido
+con el comando individual, confirma el estado de cada nodo sin llamadas adicionales
+por GID. Cursores inválidos o consultas fallidas impiden devolver la selección
+parcial como si fuera completa.
+El listado imprime JSON en stdout y resumen en stderr. Reemplaza el contenido
+de la misma ruta con la selección actual de forma atómica, sin acumular GID.
+Una lista vacía reemplaza la anterior por gids=[]; un error de consulta conserva
+el archivo previo. La salida de ejecución de change sigue siendo exclusiva.
+
+`batch_orders.py change DESTINO --input ARCHIVO --output OTRO [--dry-run]` valida
+la tienda, versión, estado, GID y siguiente paso del archivo antes de procesar.
+Reutiliza `transition_order`: cada elemento vuelve a consultarse en Shopify.
+Se procesan secuencialmente con pausa configurable, sin mutation Bulk. No se
+modifica la ruta individual, sus condiciones de pago ni su política de reintento.
+
+La salida se crea de forma exclusiva antes de mutar. Se actualiza por reemplazo
+atómico tras cada resultado. `results` contiene estado y correspondencia entre GID
+de entrada y salida; `gids` solo los éxitos en el destino, para el siguiente paso.
+Los errores por elemento no detienen el resto; un fallo de escritura del informe
+sí interrumpe. `complete=false` conserva lo registrado tras una interrupción.
+Una mutation puede haberse aplicado sin alcanzar a registrar su resultado; el
+reintento con la selección original y otra salida revalida el estado e impide
+repetir una transición ya alcanzada. No hay transacción distribuida ni rollback
+del lote. Las simulaciones generan informe, sin escrituras remotas o SQLite, y
+no se aceptan como entradas de éxitos para encadenar. `lotes/` se ignora en Git.
+
 ## Consistencia en SQLite
 
 `save_order` abre una transacción `BEGIN IMMEDIATE`, compara fechas con zona

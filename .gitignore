@@ -223,6 +223,7 @@ __marimo__/
 AGENTS.md
 prompt*.txt
 instrucciones_prueba.txt
+lotes/
 .env.*
 !.env.example
 *.db
