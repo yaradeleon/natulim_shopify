@@ -36,3 +36,10 @@ CREATE TABLE IF NOT EXISTS webhook_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_webhook_jobs_pending
     ON webhook_jobs (status, next_attempt);
+
+-- Punto de control de cargas completas/incrementales correctas. Los webhooks
+-- no lo avanzan: recibir un pedido no demuestra que no falten otros.
+CREATE TABLE IF NOT EXISTS sync_state (
+    shop_domain TEXT PRIMARY KEY NOT NULL,
+    last_successful_sync_at TEXT NOT NULL
+);

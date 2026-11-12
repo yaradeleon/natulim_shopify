@@ -16,6 +16,37 @@ El recorrido paginado anterior se conserva para pruebas mediante `bulk=False`;
 el comando usa Bulk por defecto. Interrumpir el comando no cancela la operación
 remota; una nueva ejecución inicia otra exportación.
 
+## Sincronización incremental
+
+`sync_orders.py --incremental` reutiliza el mismo flujo Bulk. Construye el filtro
+`status:any AND updated_at:>='DESDE' AND updated_at:<='HASTA'` con fechas UTC y
+`sortKey: UPDATED_AT`. DESDE es el punto anterior menos cinco minutos; HASTA es
+la hora de inicio actual, redondeada hacia abajo al segundo. El filtro se inserta
+en la consulta GraphQL usando codificación JSON, sin concatenar entradas de usuario.
+
+`sync_state(shop_domain, last_successful_sync_at)` persiste ese punto de control.
+Una carga completa correcta también lo establece; una base anterior sin marcador
+requiere repetir esa carga una vez. No se infiere de `MAX(orders.updated_at)` ni
+de los webhooks. `init_db` añade la nueva tabla sin borrar ni alterar datos previos.
+
+Se avanza tras validar la exportación y terminar todos los guardados sin fallos,
+incluidas cargas vacías. Se guarda la hora de inicio, nunca la de fin: evita saltar
+modificaciones producidas durante la descarga. Los errores dejan el marcador
+anterior y permiten repetir; las confirmaciones por pedido se conservan. Un cierre
+después de guardar pedidos pero antes del marcador provoca repetición segura.
+El marcador se actualiza en transacción con comparación del valor leído al inicio
+(compare-and-set): una carga concurrente no sobrescribe el marcador de otra.
+Se rechaza un marcador futuro para no retroceder ante un reloj local incorrecto.
+
+No se añade un segundo recorrido paginado ni pandas. El comando se ejecuta
+manualmente y no necesita FastAPI. El solapamiento mitiga indexación tardía y
+límites de tiempo; no garantiza cubrir retrasos superiores a cinco minutos,
+desfases grandes de reloj, cambios de permisos ni pedidos borrados. La carga
+completa sigue disponible para reconciliar todos los pedidos accesibles.
+El validador local de la skill Shopify comprobó la consulta con su esquema
+empaquetado 2026-04; el filtro se contrastó además con la documentación 2026-10.
+No se ha ejecutado aún la recuperación incremental contra una tienda real.
+
 `ShopifyClient` intercambia Client ID y Client Secret en
 `/admin/oauth/access_token` con `grant_type=client_credentials`. Conserva el token
 en memoria hasta `expires_in` menos un margen máximo de 60 segundos. Un lock evita
@@ -45,6 +76,40 @@ parciales, pedido nulo, versión efectiva distinta si se informa en la cabecera,
 cursores repetidos, líneas duplicadas y cambios de `updatedAt` entre páginas.
 Una respuesta inconsistente se vuelve a intentar desde el principio.
 
+## Comando de escritura explícita
+
+`change_order.py GID ESTADO [--dry-run]` usa `order_transitions.py` para consultar
+Shopify y aplicar una transición del flujo `BORRADOR -> CONFIRMADO -> PAGADO ->
+PREPARADO`. `NUEVO`/`ENVIADO` son aliases. Es un flujo propio, independiente de
+`Order.confirmed`; combina tipo de objeto, estado financiero y preparación.
+No observa ediciones de SQLite y no altera el funcionamiento de los webhooks.
+
+`DraftOrder` se completa mediante una única `draftOrderComplete` con
+`paymentPending: true`, sin consultar ni modificar `paymentTerms`. Se devuelve
+y resuelve el nuevo GID `Order`. El argumento está disponible en la API 2026-10
+(comprobado por introspección real), aunque obsoleto; es una dependencia explícita
+de este flujo sencillo. Revisarlo al cambiar versión, sin eliminarlo y aceptar
+accidentalmente el valor por defecto false. No requiere permisos payment_terms.
+`orderMarkAsPaid`
+solo se usa desde `PENDING` + `UNFULFILLED` con `canMarkAsPaid=true`; se excluyen
+autorizaciones y parciales. `fulfillmentCreate` admite una única orden de
+preparación visible, abierta, no solicitada y con acción soportada, y prepara
+todas las unidades pendientes sin avisar al cliente. `FULFILLED` no equivale a
+una entrega de transporte. No se admiten pedidos repartidos entre ubicaciones.
+
+Consulta el estado remoto antes de cada comando y lo vuelve a comprobar después
+de escribir. Repetir el estado actual no genera otra mutation, pero refresca el
+pedido local. Saltos, retrocesos y estados fuera del alcance se rechazan. El modo
+`--dry-run` no escribe ni crea SQLite. Las queries y mutations pasaron el validador
+de la skill con su esquema 2026-04 y se contrastaron con documentación 2026-10.
+No se han probado mutations contra la tienda real.
+
+No existe atomicidad entre Shopify y SQLite ni entre leer el estado y mutarlo.
+Un timeout puede ocurrir tras aplicar el cambio; no se reintenta automáticamente
+por error de red. El operador consulta primero y vuelve a ejecutar para recuperar
+la copia local. Se recomienda un solo operador por pedido durante la
+prueba. Los permisos de escritura y las restricciones están en el README.
+
 ## Consistencia en SQLite
 
 `save_order` abre una transacción `BEGIN IMMEDIATE`, compara fechas con zona
@@ -63,9 +128,9 @@ como texto decimal y las fechas se normalizan a UTC. No se usan floats para dine
 
 - Una tienda configurada y un proceso Uvicorn por base. La cola no implementa
   reclamación de trabajos entre múltiples consumidores.
-- El alcance incluye carga inicial accesible, alta y modificación. No incluye
-  borrado, reconciliación periódica ni garantía de recuperar eventos que nunca lleguen.
-  La carga manual puede repetirse. El acceso histórico depende de los permisos.
+- El alcance incluye carga inicial accesible, alta, modificación y recuperación
+  incremental manual de cambios sin webhook. No incluye borrado ni programación
+  periódica automática. El acceso histórico depende de los permisos.
 - La paginación no crea una instantánea global de la tienda. Ante cambios durante
   la carga, los webhooks y una nueva ejecución permiten converger al estado actual.
   En consultas individuales se descarta un pedido si cambia entre páginas.

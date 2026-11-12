@@ -222,6 +222,7 @@ __marimo__/
 # Configuracion local y bases de datos Shopify
 AGENTS.md
 prompt*.txt
+instrucciones_prueba.txt
 .env.*
 !.env.example
 *.db

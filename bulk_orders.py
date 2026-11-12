@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 from contextlib import closing
+from datetime import timezone
 
 import httpx
 
@@ -14,7 +15,7 @@ from shopify import ShopifyError
 
 BULK_QUERY = """
 {
-  orders(query: "status:any") {
+  orders(query: "status:any", sortKey: UPDATED_AT) {
     edges { node {
       id name createdAt updatedAt note
       displayFinancialStatus displayFulfillmentStatus
@@ -41,8 +42,21 @@ query OrderExportStatus($id: ID!) {
 """
 
 
-async def iter_bulk_orders(shopify, report, poll_seconds=5, max_wait=3600):
-    data = await shopify.graphql(START_QUERY, {"query": BULK_QUERY})
+def build_bulk_query(updated_since=None, updated_before=None):
+    filters = ["status:any"]
+    for comparator, value in ((">=", updated_since), ("<=", updated_before)):
+        if value is not None:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("La fecha del filtro necesita zona horaria")
+            timestamp = value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            filters.append(f"updated_at:{comparator}'{timestamp}'")
+    return BULK_QUERY.replace('"status:any"', json.dumps(" AND ".join(filters)))
+
+
+async def iter_bulk_orders(shopify, report, poll_seconds=5, max_wait=3600, *,
+                           updated_since=None, updated_before=None):
+    query = build_bulk_query(updated_since, updated_before)
+    data = await shopify.graphql(START_QUERY, {"query": query})
     started = data["bulkOperationRunQuery"]
     if started.get("userErrors") or not started.get("bulkOperation"):
         raise ShopifyError("No se pudo iniciar la exportación; comprueba permisos de bulk queries")

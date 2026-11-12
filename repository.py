@@ -46,6 +46,37 @@ def retry_job(path, job, error_code):
         )
 
 
+def get_sync_checkpoint(path, shop_domain):
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT last_successful_sync_at FROM sync_state WHERE shop_domain = ?",
+            (shop_domain,),
+        ).fetchone()
+        return row[0] if row else None
+
+
+def advance_sync_checkpoint(path, shop_domain, expected, completed_through):
+    """Avanza solo desde el punto leído: otra carga concurrente no se sobrescribe."""
+    value = parse_date(completed_through).isoformat()
+    if expected is not None and parse_date(value) < parse_date(expected):
+        raise ValueError("La fecha de control no puede retroceder")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT last_successful_sync_at FROM sync_state WHERE shop_domain = ?",
+            (shop_domain,),
+        ).fetchone()
+        if (row[0] if row else None) != expected:
+            return False
+        db.execute(
+            "INSERT INTO sync_state (shop_domain, last_successful_sync_at) VALUES (?, ?) "
+            "ON CONFLICT(shop_domain) DO UPDATE SET "
+            "last_successful_sync_at = excluded.last_successful_sync_at",
+            (shop_domain, value),
+        )
+        return True
+
+
 def save_order(path, job_id, order):
     """Pedido, líneas y finalización del trabajo se confirman juntos."""
     updated = parse_date(order["updatedAt"])

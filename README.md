@@ -5,11 +5,13 @@ FastAPI y SQLite. API prevista: GraphQL Admin 2026-10.
 
 ## Estado actual
 
-Implementados carga inicial masiva con Bulk Operations, almacenamiento SQLite,
-webhooks firmados de creación y actualización y consulta local por comando.
+Implementados carga inicial e incremental con Bulk Operations, almacenamiento
+SQLite, webhooks firmados de creación y actualización y consulta local por comando.
 Los avisos se guardan en una cola persistente; un consumidor consulta el estado
 actual del pedido mediante GraphQL y guarda pedido y líneas en una transacción.
-La integración no crea ni modifica pedidos en Shopify.
+Las cargas y los webhooks son de lectura en Shopify. El comando explícito
+`change_order.py` añade escritura para un flujo de demostración de estados y
+refresca después la copia local; editar SQLite directamente no dispara cambios.
 
 Durante la prueba manual se recibió una actualización real con HTTP 200 y el
 usuario confirmó que probó la actualización. También creó un pedido nuevo en
@@ -106,7 +108,7 @@ ejecutado en esos sistemas.
 
 `python init_db.py` también funciona sin instalar dependencias y sin credenciales:
 solo usa la biblioteca estándar. Crea `data/shopify.db` junto al proyecto, con
-`orders`, `order_line_items` y `webhook_jobs`. Repetirlo conserva los registros.
+`orders`, `order_line_items`, `webhook_jobs` y `sync_state`. Repetirlo conserva los registros.
 El esquema está en `schema.sql`. La inicialización es transaccional y usa
 `CREATE TABLE IF NOT EXISTS`; no realiza migraciones de esquemas anteriores.
 
@@ -160,6 +162,191 @@ la misma organización Shopify. Necesitas `read_orders`; por defecto el acceso
 a pedidos está limitado a los últimos 60 días. Los anteriores requieren acceso
 aprobado `read_all_orders`. «Todos» significa todos los accesibles con los permisos
 concedidos. Consulta la [guía oficial de autenticación](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant).
+
+## Recuperar cambios sin webhook: carga incremental
+
+Después de una carga completa correcta con esta versión, ejecuta:
+
+Windows:
+
+```powershell
+.\.venv\Scripts\python sync_orders.py --incremental
+```
+
+macOS/Linux:
+
+```bash
+.venv/bin/python sync_orders.py --incremental
+```
+
+Usa la misma exportación Bulk de la carga inicial, filtrando `orders` por
+`updated_at` y ordenando por `UPDATED_AT`. Trae los pedidos modificados en ese
+intervalo con todas sus líneas, incluidos pedidos nuevos accesibles. No lista
+todos los GID para consultarlos individualmente. No añade pandas ni dependencias.
+Shopify prepara el archivo de forma asíncrona; el tiempo real depende del volumen
+de cambios y de Shopify, y no se ha medido contra esta tienda.
+
+La tabla `sync_state` guarda `last_successful_sync_at` por dominio de tienda.
+Es la hora de **inicio** de la última carga correcta, en UTC, no la hora de su fin
+ni el mayor `Order.updatedAt` almacenado. Así, cambios durante la ejecución quedan
+para la siguiente. La consulta incremental incluye desde cinco minutos antes de
+ese punto hasta el inicio de la ejecución actual, ambos límites inclusivos.
+Repetir los pedidos del solapamiento no duplica filas ni sustituye una versión
+local más reciente. Los webhooks no avanzan este punto de control.
+
+Solo se avanza cuando toda la exportación está validada y todos sus pedidos se
+han guardado u omitido por existir una versión más reciente. Una exportación vacía
+correcta también lo avanza. Si falla una consulta, descarga, escritura o guardado
+del punto de control, el comando sale con código 1 y conserva el punto anterior;
+los pedidos ya confirmados permanecen. Repite el mismo comando para recuperarlos.
+`Ctrl+C` tampoco avanza el punto. Si otra carga lo modificó mientras esta corría,
+se conserva su valor para evitar sobrescribirlo con un resultado concurrente;
+para esta versión se recomienda ejecutar un solo comando de carga cada vez.
+
+**Bases creadas con la versión anterior:** inicializar tablas no establece una
+fecha de control. Si falta, `--incremental` avisa y termina sin llamar a Shopify
+ni lanzar automáticamente una carga completa. Ejecuta una vez `sync_orders.py`
+sin opciones y espera a que termine correctamente para establecerla. Conserva
+los datos existentes. No se deduce la fecha del pedido más reciente: podrían
+faltar modificaciones de otros pedidos anteriores a esa fecha.
+
+Es un comando manual: no ejecuta un temporizador ni requiere FastAPI o túnel.
+Su ejecución periódica puede programarse más adelante. El solapamiento reduce
+el riesgo por límites e indexación tardía, pero no garantiza recuperar retrasos
+superiores a cinco minutos. Mantén el reloj del equipo sincronizado. No recupera
+pedidos eliminados ni inaccesibles por permisos; si cambia el alcance de acceso
+o se necesita reconciliar todo el histórico, repite una carga completa.
+Cada base debe seguir dedicada a una única tienda.
+
+### Prueba de recuperación para el revisor
+
+1. Completa una carga con esta versión para establecer la fecha de control.
+2. Detén FastAPI con `Ctrl+C` para que no procese la siguiente modificación.
+3. En Shopify cambia la nota de un pedido ficticio a `Recuperado por incremental`
+   y guarda. Conserva su número.
+4. Con FastAPI todavía detenido, ejecuta `sync_orders.py --incremental`. Si
+   Shopify aún no refleja el cambio en su búsqueda, espera y repite el comando.
+5. Ejecuta `check_order.py NUMERO` con el Python del entorno. Deben verse la nota
+   nueva y `updated_at` actualizado, sin necesitar un webhook `done` para ese
+   cambio. La recuperación por Bulk no crea trabajos en `webhook_jobs`.
+6. Reinicia FastAPI. Shopify puede reintentar las entregas pendientes; el mismo
+   pedido puede procesarse de nuevo sin duplicarse.
+
+La implementación del filtro sigue la [consulta oficial de pedidos](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders)
+y el flujo de [Bulk Operations](https://shopify.dev/docs/apps/build/apis/graphql-admin/bulk-operations/queries).
+La prueba de recuperación contra la tienda real queda pendiente; las pruebas
+automatizadas descritas abajo simulan Shopify y sus fallos.
+
+## Cambiar el estado desde terminal
+
+`change_order.py` consulta Shopify, valida el avance, ejecuta la operación remota
+y refresca SQLite. Es una entrada explícita por GID y estado; no observa cambios
+directos en las tablas. No necesita FastAPI ni Cloudflare para funcionar.
+
+El flujo de demostración es `BORRADOR -> CONFIRMADO -> PAGADO -> PREPARADO`.
+`NUEVO` es alias de `BORRADOR` y `ENVIADO` de `PREPARADO`. Estos nombres son una
+regla de esta aplicación, no un único campo de estado de Shopify:
+
+| Estado del flujo | Representación / operación en Shopify |
+| --- | --- |
+| `BORRADOR` | `DraftOrder.status` en `OPEN` o `INVOICE_SENT`; el comando no crea borradores. |
+| `CONFIRMADO` | `Order` con `displayFinancialStatus=PENDING` y `displayFulfillmentStatus=UNFULFILLED`, creado mediante `draftOrderComplete`. No se interpreta el booleano `Order.confirmed` como este estado. |
+| `PAGADO` | `displayFinancialStatus=PAID` y `UNFULFILLED`, mediante `orderMarkAsPaid`. |
+| `PREPARADO` / `ENVIADO` | `PAID` y `FULFILLED`, mediante `fulfillmentCreate`; no acredita recogida del transportista ni entrega física. |
+
+### Permisos y preparación de la prueba
+
+Además de las credenciales de `.env`, autoriza los permisos de la app necesarios
+para el flujo: `read_orders`, `write_orders`, `read_draft_orders`,
+`write_draft_orders`,
+`read_merchant_managed_fulfillment_orders` y `write_merchant_managed_fulfillment_orders`.
+La cuenta debe poder completar borradores, marcar como pagado y preparar
+pedidos. Si cambias los permisos, vuelve a autorizar la instalación según indique
+Shopify; cada ejecución del comando obtiene un token nuevo.
+El comando no crea ni modifica condiciones de pago y no requiere
+`read_payment_terms` ni `write_payment_terms`.
+
+Usa un borrador ficticio con importe positivo y un producto físico cuya preparación
+gestione la tienda en una sola ubicación. `PAGADO` registra un pago real en el
+sistema: no es cambiar una etiqueta local. El flujo rechaza autorizaciones,
+pagos/reembolsos parciales, cancelados, retenidos y preparaciones parciales.
+
+### Ejemplo completo
+
+1. En Shopify crea un borrador ficticio (Pedidos > Crear pedido) y déjalo como
+   borrador. Obtén su ID numérico de la URL `/draft_orders/ID` y construye
+   `gid://shopify/DraftOrder/ID`. Para un pedido ya importado, `check_order.py`
+   muestra su `shopify_order_id`. El GID no es el número visible `#6501`.
+2. Opcionalmente comprueba la transición sin modificar Shopify ni SQLite:
+
+   ```powershell
+   .\.venv\Scripts\python change_order.py "gid://shopify/DraftOrder/123" CONFIRMADO --dry-run
+   ```
+
+3. Confirma el borrador:
+
+   ```powershell
+   .\.venv\Scripts\python change_order.py "gid://shopify/DraftOrder/123" CONFIRMADO
+   ```
+
+   Sustituye `123` por el ID real. Ejecuta únicamente
+   `draftOrderComplete(id: ..., paymentPending: true)`: confirma el borrador
+   dejando el pago pendiente, sin añadir ni modificar condiciones de pago.
+   **Devuelve otro GID**, de tipo `Order`; úsalo a
+   partir de este punto. No se guardan borradores como si fueran pedidos locales.
+4. Con el GID del pedido que devolvió, por ejemplo `gid://shopify/Order/456`:
+
+   ```powershell
+   .\.venv\Scripts\python change_order.py "gid://shopify/Order/456" PAGADO
+   .\.venv\Scripts\python change_order.py "gid://shopify/Order/456" PREPARADO
+   .\.venv\Scripts\python check_order.py "gid://shopify/Order/456"
+   ```
+
+   Se requiere `canMarkAsPaid=true` para pagar. Preparar requiere exactamente una
+   `FulfillmentOrder` visible, `OPEN`, `UNSUBMITTED` y con acción
+   `CREATE_FULFILLMENT`. Se preparan todas sus unidades pendientes, sin truncar
+   líneas, con `notifyCustomer=false`. Se rechazan más órdenes de preparación
+   o páginas adicionales antes de escribir; no se gestionan servicios externos.
+
+En macOS/Linux sustituye `.\.venv\Scripts\python` por `.venv/bin/python` en los
+mismos comandos. Los identificadores del ejemplo son ficticios.
+
+No se permiten saltos ni retrocesos. Pedir `BORRADOR`/`NUEVO` para un pedido ya
+confirmado devuelve un mensaje de que ha avanzado y código de salida 1.
+Si Shopify no devuelve el pedido o borrador, muestra: «Pedido o borrador no
+disponible; comprueba el GID y los permisos de lectura», y termina con código 1
+sin ejecutar mutations ni guardar el pedido en SQLite. No se puede distinguir
+solo con una respuesta nula si el recurso no existe o no es accesible.
+Un ID con formato incorrecto (por ejemplo `#6501` o un número sin GID) se rechaza
+antes de consultar Shopify y muestra un ejemplo del formato completo requerido.
+En modo normal el comando puede inicializar las tablas locales antes de detectar
+un pedido inexistente, pero no inserta ni actualiza ese pedido; `--dry-run` no
+inicializa la base ni escribe en ella.
+Repetir el estado actual devuelve éxito sin repetir mutations y refresca SQLite
+si es un `Order`. Se puede reutilizar el GID de un borrador completado: el comando
+resuelve su nuevo pedido antes de validar el paso. `--dry-run` es una consulta
+previa, no reserva el estado ni garantiza que la operación posterior sea aceptada.
+
+`paymentPending` sigue disponible y se verificó por introspección en la API
+2026-10 de la tienda, pero Shopify lo marca como obsoleto y recomienda usar
+condiciones de pago. Se mantiene para este flujo sencillo solicitado, sin
+gestionar condiciones. Revisar su disponibilidad antes de cambiar de versión;
+no quitarlo sin más: su valor por defecto es `false` y podría marcar el pedido
+como pagado al completarlo. No se ejecutan escrituras de prueba automáticamente.
+
+Shopify y SQLite no comparten transacción. Si hay interrupción,
+error de red o fallo local posterior, el cambio remoto puede estar aplicado: el
+comando lo advierte y no promete rollback. Consulta primero con `--dry-run` y
+repite el estado solicitado para refrescar SQLite sin volver a ejecutarlo cuando
+Shopify ya lo muestre. No ejecutes transiciones concurrentes sobre el mismo pedido;
+la validación y la mutation no forman una operación atómica entre ambas lecturas.
+
+La [confirmación de borradores](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/draftOrderComplete),
+el [registro de pago](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/orderMarkAsPaid)
+y la [creación de fulfillment](https://shopify.dev/docs/api/admin-graphql/2026-10/mutations/fulfillmentCreate)
+se contrastaron con el plugin y la documentación oficial. La prueba de escritura
+contra la tienda real sigue pendiente; durante el desarrollo solo se simularon
+las respuestas y no se modificó ningún pedido remoto.
 
 ## Modelo y correspondencia con Shopify
 
@@ -218,7 +405,7 @@ sincronización con la tienda real. En macOS/Linux usa `.venv/bin/python`.
 Las bases locales y los archivos `.env` se excluyen de Git. No guardar tokens ni
 credenciales en el repositorio.
 
-Verificado localmente en Windows con Python 3.13: 38 pruebas, compatibilidad de
+Verificado localmente en Windows con Python 3.13: 71 pruebas, compatibilidad de
 dependencias con `pip check`, creación SQLite y arranque real de Uvicorn en una
 copia temporal de los archivos del proyecto. La prueba de arranque usa `.env`
 con credenciales ficticias y una ruta de base distinta para demostrar su carga;
@@ -229,6 +416,13 @@ Estado actual. La importación total y su duración no cuentan con un resumen
 de resultados registrado. macOS/Linux no se han probado en esta sesión.
 Las pruebas simulan la obtención/renovación del token, carga repetida, paginación
 de pedidos y líneas, preservación ante errores y continuidad tras un fallo de escritura.
+La cobertura incremental incluye filtro temporal y solapamiento, fechas UTC,
+recuperación sin webhook con 301 líneas, carga vacía, ausencia de punto de control,
+fallos y cancelación sin avanzar la fecha, repetición sin duplicados, preservación
+de versiones nuevas y control de actualizaciones concurrentes del marcador.
+Las pruebas de escritura simulan el flujo completo, cambio de GID, permisos
+rechazados, saltos/retrocesos, repetición sin nuevas mutations, simulación sin
+escrituras, errores de red ambiguos y recuperación tras fallo de SQLite.
 
 ## Prueba de aceptación con Shopify (Windows, macOS y Linux)
 
