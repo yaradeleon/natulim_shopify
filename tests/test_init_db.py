@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from init_db import init_db
+from app.storage.database import init_db
 
 
 class DatabaseTests(unittest.TestCase):
@@ -18,7 +18,9 @@ class DatabaseTests(unittest.TestCase):
 
     def insert_order(self):
         self.connection.execute(
-            "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO orders (shopify_order_id, name, created_at, updated_at, note, "
+            "financial_status, fulfillment_status, current_total_amount, currency_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("gid://shopify/Order/1", "#PRUEBA", "2026-11-11T10:00:00Z",
              "2026-11-11T10:00:00Z", None, None, "UNFULFILLED", "19.90", "EUR"),
         )

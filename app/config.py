@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from init_db import PROJECT_DIR, DEFAULT_DB_PATH
+from app.paths import PROJECT_DIR, DEFAULT_DB_PATH
 
 
 class ConfigurationError(ValueError):
@@ -65,7 +65,7 @@ class Settings:
         if problems:
             raise ConfigurationError(
                 "Configuración inválida:\n- " + "\n- ".join(problems)
-                + "\nCopia .env.example a .env junto a config.py y corrige estas variables. "
+                + "\nCopia .env.example a .env en la raíz del proyecto y corrige estas variables. "
                 "Las variables del entorno tienen prioridad sobre .env."
             )
         return cls(domain, client_id, client_secret, path, version, secret)

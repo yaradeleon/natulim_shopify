@@ -6,11 +6,11 @@ from pathlib import Path
 
 import httpx
 
-from config import Settings
-from init_db import init_db
-from repository import connect, save_order
-from shopify import ShopifyClient
-from sync_orders import import_orders
+from app.config import Settings
+from app.storage.database import init_db
+from app.storage.repository import connect, save_order
+from app.shopify.client import ShopifyClient
+from app.services.import_orders import import_orders
 from test_sync import example
 
 

@@ -22,8 +22,10 @@ class StartupTests(unittest.TestCase):
     def test_clean_copy_loads_dotenv_and_serves_health(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("config.py", "main.py", "init_db.py", "repository.py", "shopify.py",
-                         "sync_service.py", "schema.sql", ".env.example", "requirements.txt"):
+            shutil.copytree(ROOT / "app", root / "app",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            for name in ("main.py", "init_db.py", "sync_orders.py", "change_order.py",
+                         "batch_orders.py", "check_order.py", "schema.sql", ".env.example", "requirements.txt"):
                 shutil.copy2(ROOT / name, root / name)
             content = (root / ".env.example").read_text(encoding="utf-8")
             content = content.replace("REEMPLAZAR_AQUI", "credencial-ficticia-local")

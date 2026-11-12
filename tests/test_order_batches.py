@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-import batch_orders
-from config import Settings
-from init_db import init_db
-from order_batches import apply_batch, manifest, read_manifest, select_batch, write_manifest
-from order_transitions import TransitionError, TransitionResult
-from repository import connect
-from shopify import ShopifyClient, ShopifyError
+from app.cli import batch_orders
+from app.config import Settings
+from app.storage.database import init_db
+from app.services.batches import apply_batch, manifest, read_manifest, select_batch, write_manifest
+from app.services.transitions import TransitionError, TransitionResult
+from app.storage.repository import connect
+from app.shopify.client import ShopifyClient, ShopifyError
 from test_order_transitions import DRAFT, ORDER, Store
 
 
@@ -85,7 +85,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         results = [TransitionResult(ORDER, "CONFIRMADO", True, True),
                    TransitionError("Ya ha avanzado"),
                    TransitionResult("gid://shopify/Order/3", "CONFIRMADO", False, True)]
-        with patch("order_batches.transition_order", new=AsyncMock(side_effect=results)) as change:
+        with patch("app.services.batches.transition_order", new=AsyncMock(side_effect=results)) as change:
             result = await apply_batch(self.shopify(), self.settings.db_path, self.source,
                                        "CONFIRMADO", self.output, delay=0, report=self.messages.append)
         self.assertEqual(change.await_count, 3)
@@ -127,6 +127,18 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.mutations, [])
         self.assertEqual(result["gids"], [])
 
+    async def test_change_during_refresh_is_not_exported_as_a_success_gid(self):
+        self.source_file(state="CONFIRMADO", gids=[ORDER])
+        store = Store()
+        store.change_on_snapshot = True
+        async with httpx.AsyncClient(transport=httpx.MockTransport(store.respond)) as client:
+            result = await apply_batch(ShopifyClient(self.settings, client), self.settings.db_path,
+                                       self.source, "PAGADO", self.output, delay=0, report=self.messages.append)
+        self.assertEqual(result["gids"], [])
+        self.assertEqual(result["results"][0]["status"], "failed")
+        with connect(self.settings.db_path) as db:
+            self.assertEqual(db.execute("SELECT financial_status FROM orders").fetchone()[0], "REFUNDED")
+
     async def test_dry_run_no_mutations_or_sqlite_writes_and_not_reusable_as_success(self):
         self.source_file()
         store = Store()
@@ -144,7 +156,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_preserves_completed_items(self):
         self.source_file(gids=[DRAFT, "gid://shopify/DraftOrder/12"])
-        with patch("order_batches.transition_order", new=AsyncMock(side_effect=[
+        with patch("app.services.batches.transition_order", new=AsyncMock(side_effect=[
             TransitionResult(ORDER, "CONFIRMADO", True, True), asyncio.CancelledError(),
         ])):
             with self.assertRaises(asyncio.CancelledError):
@@ -158,7 +170,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_output_or_same_path_prevents_mutations(self):
         self.source_file()
         self.output.write_text("keep", encoding="utf-8")
-        with patch("order_batches.transition_order", new=AsyncMock()) as change:
+        with patch("app.services.batches.transition_order", new=AsyncMock()) as change:
             for output in (self.source, self.output):
                 with self.subTest(output=output), self.assertRaises((TransitionError, FileExistsError)):
                     await apply_batch(self.shopify(), self.settings.db_path, self.source, "CONFIRMADO",
@@ -169,7 +181,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_shop_invalid_gid_or_state_jump_fails_before_processing(self):
         self.source_file()
         data = json.loads(self.source.read_text(encoding="utf-8"))
-        with patch("order_batches.transition_order", new=AsyncMock()) as change:
+        with patch("app.services.batches.transition_order", new=AsyncMock()) as change:
             for changes in ({"shop_domain": "otra.myshopify.com"}, {"gids": ["#D12"]},
                             {"gids": [ORDER]}, {"version": 5}):
                 invalid = dict(data, **changes)
@@ -185,7 +197,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_input_ids_processed_once(self):
         self.source_file(gids=[DRAFT, DRAFT])
-        with patch("order_batches.transition_order", new=AsyncMock(
+        with patch("app.services.batches.transition_order", new=AsyncMock(
             return_value=TransitionResult(ORDER, "CONFIRMADO", True, True),
         )) as change:
             await apply_batch(self.shopify(), self.settings.db_path, self.source, "CONFIRMADO",
@@ -194,7 +206,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unexpected_error_detail_is_not_exposed(self):
         self.source_file()
-        with patch("order_batches.transition_order", new=AsyncMock(side_effect=RuntimeError("private-secret"))):
+        with patch("app.services.batches.transition_order", new=AsyncMock(side_effect=RuntimeError("private-secret"))):
             result = await apply_batch(self.shopify(), self.settings.db_path, self.source, "CONFIRMADO",
                                        self.output, delay=0, report=self.messages.append)
         self.assertEqual(result["results"][0]["error"], "RuntimeError")
@@ -203,7 +215,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_selection_is_valid_noop(self):
         self.source_file(gids=[])
-        with patch("order_batches.transition_order", new=AsyncMock()) as change:
+        with patch("app.services.batches.transition_order", new=AsyncMock()) as change:
             result = await apply_batch(self.shopify(), self.settings.db_path, self.source, "CONFIRMADO",
                                        self.output, delay=0, report=self.messages.append)
         change.assert_not_awaited()
@@ -219,8 +231,8 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         args = SimpleNamespace(command="list", state="BORRADOR", limit=20, output=self.output)
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch("batch_orders.Settings.from_env", return_value=settings), \
-             patch("batch_orders.httpx.AsyncClient", return_value=client), \
+        with patch("app.cli.batch_orders.Settings.from_env", return_value=settings), \
+             patch("app.cli.batch_orders.httpx.AsyncClient", return_value=client), \
              redirect_stdout(stdout), redirect_stderr(stderr):
             self.assertEqual(await batch_orders.run(args), 0)
         self.assertEqual(json.loads(stdout.getvalue())["gids"], [DRAFT])
@@ -239,10 +251,10 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json={"data": page([draft(12)])})
         async def run_once():
             client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-            with patch("batch_orders.Settings.from_env", return_value=self.settings), \
-                 patch("batch_orders.httpx.AsyncClient", return_value=client), patch("builtins.print"):
+            with patch("app.cli.batch_orders.Settings.from_env", return_value=self.settings), \
+                 patch("app.cli.batch_orders.httpx.AsyncClient", return_value=client), patch("builtins.print"):
                 return await batch_orders.run(args)
-        with patch("batch_orders.select_batch", new=AsyncMock(side_effect=ShopifyError("private"))):
+        with patch("app.cli.batch_orders.select_batch", new=AsyncMock(side_effect=ShopifyError("private"))):
             self.assertEqual(await run_once(), 1)
         self.assertEqual(json.loads(self.output.read_text(encoding="utf-8")), original)
         self.assertEqual(await run_once(), 0)
@@ -255,8 +267,8 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         client = httpx.AsyncClient(transport=httpx.MockTransport(store.respond))
         args = SimpleNamespace(command="change", target="PAGADO", input=self.source,
                                output=self.output, dry_run=False, delay=0)
-        with patch("batch_orders.Settings.from_env", return_value=self.settings), \
-             patch("batch_orders.httpx.AsyncClient", return_value=client), patch("builtins.print"):
+        with patch("app.cli.batch_orders.Settings.from_env", return_value=self.settings), \
+             patch("app.cli.batch_orders.httpx.AsyncClient", return_value=client), patch("builtins.print"):
             self.assertEqual(await batch_orders.run(args), 1)
         result = json.loads(self.output.read_text(encoding="utf-8"))
         self.assertEqual(result["results"][0]["status"], "failed")

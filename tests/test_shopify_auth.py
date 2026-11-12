@@ -6,8 +6,8 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from config import Settings
-from shopify import ShopifyClient, ShopifyError
+from app.config import Settings
+from app.shopify.client import ShopifyClient, ShopifyError
 
 
 class AuthTests(unittest.IsolatedAsyncioTestCase):
@@ -22,7 +22,7 @@ class AuthTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             shopify = ShopifyClient(settings, client)
             # Un reloj propio evita alterar los tiempos internos del event loop.
-            with patch("shopify.time") as clock:
+            with patch("app.shopify.client.time") as clock:
                 clock.monotonic.return_value = 1000
                 self.assertEqual(await shopify.get_token(), "token-1")
                 clock.monotonic.return_value = 1100

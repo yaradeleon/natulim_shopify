@@ -10,7 +10,7 @@ from datetime import timezone
 
 import httpx
 
-from shopify import ShopifyError
+from app.shopify.client import ShopifyError
 
 
 BULK_QUERY = """

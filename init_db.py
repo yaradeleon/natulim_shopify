@@ -2,30 +2,10 @@
 
 import argparse
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 
-
-PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_DB_PATH = PROJECT_DIR / "data" / "shopify.db"
-SCHEMA_PATH = PROJECT_DIR / "schema.sql"
-
-
-def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> Path:
-    """Inicializa una base local; repetirlo conserva tablas y registros."""
-    schema = SCHEMA_PATH.read_text(encoding="utf-8")
-    target = Path(db_path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    with closing(sqlite3.connect(target)) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        try:
-            connection.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
-        except sqlite3.Error:
-            connection.rollback()
-            raise
-
-    return target
+from app.paths import DEFAULT_DB_PATH
+from app.storage.database import init_db
 
 
 def main() -> None:

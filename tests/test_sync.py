@@ -9,16 +9,16 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from fastapi.testclient import TestClient
 
-from config import Settings
-from init_db import init_db
-from main import create_app, process_one
-from repository import connect, enqueue, next_job, save_order
-from shopify import ShopifyClient, ShopifyError
+from app.config import Settings
+from app.storage.database import init_db
+from app.webhooks import create_app, process_one
+from app.storage.repository import connect, enqueue, next_job, retry_job, save_order
+from app.shopify.client import ShopifyClient, ShopifyError
 
 
 def example():
@@ -78,6 +78,8 @@ class SyncTests(unittest.TestCase):
         save_order(self.settings.db_path, "delivery-1", example())
         self.assertEqual(self.rows("orders")[0]["note"], "Nota actualizada")
         self.assertTrue(all(row["status"] == "done" for row in self.rows("webhook_jobs")))
+        enqueue(self.settings.db_path, "unsupported-topic", example()["id"], "unsupported/topic")
+        self.assertIsNone(next_job(self.settings.db_path))
 
     def test_invalid_signature_and_shop_do_not_enqueue(self):
         body = b'{"id": 1}'
@@ -93,6 +95,12 @@ class SyncTests(unittest.TestCase):
     def test_existing_shopify_routes_validate_signature_topic_and_deduplicate(self):
         body = b'{"id": 1}'
         with TestClient(create_app(self.settings, start_worker=False)) as client:
+            unsupported = self.headers(body)
+            unsupported["X-Shopify-Topic"] = "orders/delete"
+            self.assertEqual(client.post("/shopify/webhook/orders/delete", content=body,
+                                         headers=unsupported).status_code, 404)
+            self.assertEqual(client.post("/webhooks/orders", content=body,
+                                         headers=unsupported).status_code, 400)
             for index, topic in enumerate(("orders/create", "orders/updated")):
                 route = f"/shopify/webhook/{topic}"
                 headers = self.headers(body)
@@ -113,6 +121,32 @@ class SyncTests(unittest.TestCase):
         job = self.rows("webhook_jobs")[0]
         self.assertEqual((job["status"], job["attempts"]), ("pending", 1))
         self.assertEqual(self.rows("orders"), [])
+
+    def test_due_retry_gets_a_turn_before_later_arrivals(self):
+        path = self.settings.db_path
+        with patch("app.storage.repository.time.time", return_value=1000):
+            enqueue(path, "retry", example()["id"], "orders/updated")
+            retry_job(path, next_job(path), "ShopifyError")
+        with patch("app.storage.repository.time.time", return_value=1001):
+            self.assertIsNone(next_job(path))  # Espera de 2 segundos aún vigente.
+        with patch("app.storage.repository.time.time", return_value=1003):
+            for index in range(3):
+                enqueue(path, f"new-{index}", example()["id"], "orders/create")
+            self.assertEqual(next_job(path)["delivery_id"], "retry")
+            shopify = AsyncMock()
+            shopify.fetch_order.return_value = example()
+            asyncio.run(process_one(self.settings, shopify))
+            self.assertEqual(next_job(path)["delivery_id"], "new-0")
+
+    def test_duplicate_does_not_reschedule_a_retry(self):
+        path = self.settings.db_path
+        with patch("app.storage.repository.time.time", return_value=1000):
+            enqueue(path, "retry", example()["id"], "orders/updated")
+            retry_job(path, next_job(path), "ShopifyError")
+        with patch("app.storage.repository.time.time", return_value=1001):
+            self.assertFalse(enqueue(path, "retry", example()["id"], "orders/updated"))
+            self.assertIsNone(next_job(path))
+        self.assertEqual(self.rows("webhook_jobs")[0]["next_attempt"], 1002)
 
     def test_worker_recovers_persisted_job_on_startup(self):
         enqueue(self.settings.db_path, "before-start", example()["id"], "orders/create")

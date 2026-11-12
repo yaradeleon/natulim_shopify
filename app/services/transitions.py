@@ -2,10 +2,10 @@
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
-from shopify import ShopifyError
-from sync_service import sync_order
+from app.shopify.client import ShopifyError
+from app.services.sync import sync_order_snapshot
 
 
 STATES = ("BORRADOR", "CONFIRMADO", "PAGADO", "PREPARADO")
@@ -130,9 +130,27 @@ async def inspect_state(shopify, gid):
 
 async def mutate(shopify, query, variables, field):
     payload = (await shopify.graphql(query, variables)).get(field)
-    if (not isinstance(payload, dict) or not isinstance(payload.get("userErrors"), list)
-            or payload["userErrors"]):
-        raise TransitionError("Shopify rechazó la operación. Comprueba permisos, saldo, inventario y el estado actual; no se muestran respuestas sensibles.")
+    if not isinstance(payload, dict) or not isinstance(payload.get("userErrors"), list):
+        raise TransitionError("Respuesta de operación inválida; consulta el estado remoto antes de repetir.")
+    if payload["userErrors"]:
+        # Solo nombres de operaciones y campos conocidos; nunca mensajes remotos
+        # que puedan incluir datos personales o valores de entrada sensibles.
+        operations = {"draftOrderComplete", "orderMarkAsPaid", "fulfillmentCreate"}
+        fields = {"id", "input", "fulfillment", "lineItemsByFulfillmentOrder",
+                  "fulfillmentOrderId", "fulfillmentOrderLineItems", "quantity",
+                  "notifyCustomer", "paymentPending"}
+        paths = []
+        for error in payload["userErrors"]:
+            path = error.get("field") if isinstance(error, dict) else None
+            if isinstance(path, list) and path and len(path) <= 8 and all(
+                isinstance(part, str) and (part in fields or (part.isdigit() and len(part) <= 6))
+                for part in path
+            ):
+                paths.append(".".join(path))
+        operation = field if field in operations else "la operación"
+        details = ", ".join(sorted(set(paths))) or "no especificados"
+        raise TransitionError(f"Shopify rechazó {operation}. Campos: {details}. "
+                              "Comprueba permisos, saldo, inventario y estado actual; no se muestran valores ni mensajes remotos.")
     return payload
 
 
@@ -154,10 +172,17 @@ async def prepare_input(shopify, gid):
             "lineItemsByFulfillmentOrder": [{"fulfillmentOrderId": fulfillment_order["id"]}]}
 
 
-async def confirm_draft(shopify, node):
-    amount = Decimal(node["totalPriceSet"]["shopMoney"]["amount"])
+def validate_draft_amount(node):
+    try:
+        amount = Decimal(node["totalPriceSet"]["shopMoney"]["amount"])
+    except (InvalidOperation, TypeError, KeyError):
+        raise TransitionError("No se pudo validar el importe del borrador.") from None
     if not amount.is_finite() or amount <= 0:
         raise TransitionError("Usa un borrador con importe positivo para demostrar pago pendiente y pago posterior.")
+
+
+async def confirm_draft(shopify, node):
+    validate_draft_amount(node)
     # Disponible en la API 2026-10, aunque obsoleto: confirmar sin cobrar ni
     # crear/modificar paymentTerms. No quitar este argumento: su defecto es false.
     payload = await mutate(shopify, CONFIRM_MUTATION, {"id": node["id"]}, "draftOrderComplete")
@@ -181,6 +206,8 @@ async def transition_order(shopify, db_path, gid, target, *, dry_run=False, repo
         raise TransitionError(f"No se puede saltar de {current} a {target}. Siguiente paso: {STATES[STATES.index(current) + 1]}.")
     if target == "PAGADO" and current == "CONFIRMADO" and node["canMarkAsPaid"] is not True:
         raise TransitionError("Shopify no permite marcar este pedido como pagado.")
+    if target == "CONFIRMADO" and current == "BORRADOR":
+        validate_draft_amount(node)
     fulfillment_input = None
     if target == "PREPARADO" and current == "PAGADO":
         fulfillment_input = await prepare_input(shopify, gid)
@@ -209,10 +236,15 @@ async def transition_order(shopify, db_path, gid, target, *, dry_run=False, repo
     # también permite recuperar SQLite al repetir un comando ya aplicado.
     report(f"GID del pedido para siguientes pasos y consultas: {gid}.")
     try:
-        _, actual = await inspect_state(shopify, gid)
-        await sync_order(shopify, db_path, gid)
+        snapshot = await sync_order_snapshot(shopify, db_path, gid)
     except Exception:
         raise TransitionError(f"Revisa Shopify para {gid}: el cambio puede estar aplicado, pero no se pudo verificar/refrescar SQLite. Repite la consulta o sincroniza; no se revierte el cambio remoto.") from None
+    if not snapshot.saved:
+        raise TransitionError("No se confirma el resultado local: SQLite conserva una versión más reciente. Consulta el estado y sincroniza antes de continuar.")
+    try:
+        actual = classify_state(snapshot.order)
+    except TransitionError:
+        raise TransitionError("SQLite refrescada con la respuesta de Shopify, pero el pedido está fuera del flujo solicitado. No se registra como éxito ni se aplican más cambios.") from None
     if actual != target:
         raise TransitionError(f"SQLite refrescada, pero Shopify indica {actual}, no {target}. No se aplican más cambios automáticamente.")
     report(f"Estado verificado: {actual}. SQLite refrescada.")

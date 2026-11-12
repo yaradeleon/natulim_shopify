@@ -7,11 +7,12 @@ from pathlib import Path
 
 import httpx
 
-from config import Settings
-from init_db import init_db
-from repository import connect, save_order
-from shopify import ShopifyClient
-from sync_orders import import_orders, run
+from app.config import Settings
+from app.storage.database import init_db
+from app.storage.repository import connect, save_order
+from app.shopify.client import ShopifyClient
+from app.services.import_orders import import_orders
+from app.cli.sync_orders import run
 from test_sync import example
 
 
@@ -33,8 +34,8 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
                 }}})
 
             client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-            with patch("sync_orders.Settings.from_env", return_value=settings), \
-                 patch("sync_orders.httpx.AsyncClient", return_value=client), \
+            with patch("app.cli.sync_orders.Settings.from_env", return_value=settings), \
+                 patch("app.cli.sync_orders.httpx.AsyncClient", return_value=client), \
                  patch("builtins.print") as output:
                 self.assertEqual(await run(), 0)
             self.assertTrue(settings.db_path.is_file())
@@ -46,8 +47,8 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
             client = httpx.AsyncClient(transport=httpx.MockTransport(
                 lambda request: httpx.Response(403, json={"error": "private-secret"})
             ))
-            with patch("sync_orders.Settings.from_env", return_value=settings), \
-                 patch("sync_orders.httpx.AsyncClient", return_value=client), \
+            with patch("app.cli.sync_orders.Settings.from_env", return_value=settings), \
+                 patch("app.cli.sync_orders.httpx.AsyncClient", return_value=client), \
                  patch("builtins.print") as output:
                 self.assertEqual(await run(), 1)
             self.assertNotIn("private-secret", str(output.call_args_list))

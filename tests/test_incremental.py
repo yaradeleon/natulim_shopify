@@ -10,14 +10,15 @@ from unittest.mock import patch
 
 import httpx
 
-from bulk_orders import build_bulk_query
-from config import Settings
-from init_db import init_db
-from repository import (
+from app.shopify.bulk import build_bulk_query
+from app.config import Settings
+from app.storage.database import init_db
+from app.storage.repository import (
     advance_sync_checkpoint, connect, get_sync_checkpoint, save_order,
 )
-from shopify import ShopifyClient
-from sync_orders import import_orders, run
+from app.shopify.client import ShopifyClient
+from app.services.import_orders import import_orders
+from app.cli.sync_orders import run
 from test_sync import example
 
 
@@ -79,7 +80,7 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
 
         messages = []
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            with patch("sync_orders.datetime") as clock:
+            with patch("app.services.import_orders.datetime") as clock:
                 clock.now.return_value = datetime.fromisoformat(now)
                 result = await import_orders(
                     self.settings, ShopifyClient(self.settings, client), messages.append,
@@ -182,7 +183,7 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checkpoint_write_failure_returns_error_for_retry(self):
         self.seed()
-        with patch("sync_orders.advance_sync_checkpoint", side_effect=sqlite3.OperationalError):
+        with patch("app.services.import_orders.advance_sync_checkpoint", side_effect=sqlite3.OperationalError):
             result, _, _ = await self.export()
         self.assertTrue(result.listing_failed)
         self.assertEqual(self.checkpoint(), BASELINE)
@@ -218,7 +219,7 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_sync_checkpoint(other.db_path, other.shop_domain))
 
     async def test_command_uses_incremental_option_and_returns_failure(self):
-        with patch("sync_orders.Settings.from_env", return_value=self.settings), \
+        with patch("app.cli.sync_orders.Settings.from_env", return_value=self.settings), \
              patch("builtins.print"):
             self.assertEqual(await run(incremental=True), 1)
 

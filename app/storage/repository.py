@@ -3,7 +3,7 @@ import time
 from contextlib import contextmanager
 from decimal import Decimal
 
-from shopify import parse_date
+from app.dates import parse_date
 
 
 @contextmanager
@@ -21,8 +21,8 @@ def connect(path):
 def enqueue(path, delivery_id, order_id, topic):
     with connect(path) as db:
         cursor = db.execute(
-            "INSERT INTO webhook_jobs (delivery_id, order_id, topic) VALUES (?, ?, ?) "
-            "ON CONFLICT(delivery_id) DO NOTHING", (delivery_id, order_id, topic),
+            "INSERT INTO webhook_jobs (delivery_id, order_id, topic, next_attempt) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(delivery_id) DO NOTHING", (delivery_id, order_id, topic, time.time()),
         )
         return cursor.rowcount == 1
 
@@ -31,6 +31,7 @@ def next_job(path):
     with connect(path) as db:
         row = db.execute(
             "SELECT * FROM webhook_jobs WHERE status = 'pending' AND next_attempt <= ? "
+            "AND topic IN ('orders/create', 'orders/updated') "
             "ORDER BY next_attempt, rowid LIMIT 1", (time.time(),),
         ).fetchone()
         return dict(row) if row else None
@@ -92,7 +93,9 @@ def save_order(path, job_id, order):
         saved = not existing or updated >= parse_date(existing["updated_at"])
         if saved:
             db.execute(
-                "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO orders (shopify_order_id, name, created_at, updated_at, note, "
+                "financial_status, fulfillment_status, current_total_amount, currency_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(shopify_order_id) DO UPDATE SET "
                 "name=excluded.name, created_at=excluded.created_at, updated_at=excluded.updated_at, "
                 "note=excluded.note, financial_status=excluded.financial_status, "

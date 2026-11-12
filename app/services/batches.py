@@ -8,7 +8,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from order_transitions import STATES, TransitionError, classify_state, normalize_state, transition_order, validate_gid
+from app.services.transitions import STATES, TransitionError, classify_state, normalize_state, transition_order, validate_gid
 
 
 LIST_DRAFTS_QUERY = """

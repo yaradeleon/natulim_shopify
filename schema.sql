@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS webhook_jobs (
     topic TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
     attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt REAL NOT NULL DEFAULT 0,
+    next_attempt REAL NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS REAL)),
     last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_webhook_jobs_pending

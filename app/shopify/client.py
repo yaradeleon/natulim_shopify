@@ -1,15 +1,16 @@
 import asyncio
 import math
 import time
-from datetime import datetime, timezone
 
 import httpx
+
+from app.dates import parse_date
 
 
 ORDER_QUERY = """
 query SyncOrder($id: ID!, $after: String) {
   order(id: $id) {
-    id name createdAt updatedAt note
+    __typename id name createdAt updatedAt note cancelledAt closed
     displayFinancialStatus displayFulfillmentStatus
     currentTotalPriceSet { shopMoney { amount currencyCode } }
     lineItems(first: 100, after: $after) {
@@ -32,13 +33,6 @@ query ListOrders($after: String) {
 
 class ShopifyError(Exception):
     """Error recuperable sin incluir respuestas ni credenciales en el mensaje."""
-
-
-def parse_date(value):
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("Fecha sin zona horaria")
-    return parsed.astimezone(timezone.utc)
 
 
 class ShopifyClient:

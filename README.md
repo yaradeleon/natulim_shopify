@@ -9,16 +9,32 @@ Implementados carga inicial e incremental con Bulk Operations, almacenamiento
 SQLite, webhooks firmados de creación y actualización y consulta local por comando.
 Los avisos se guardan en una cola persistente; un consumidor consulta el estado
 actual del pedido mediante GraphQL y guarda pedido y líneas en una transacción.
+Cada aviso nuevo guarda su hora de entrada en `next_attempt`. Los trabajos
+disponibles se procesan por esa fecha: un reintento cuya espera ya venció tiene
+turno antes que avisos recibidos después. Las entregas duplicadas no cambian
+la fecha del reintento ni su espera.
 Las cargas y los webhooks son de lectura en Shopify. El comando explícito
 `change_order.py` añade escritura para un flujo de demostración de estados y
 refresca después la copia local; editar SQLite directamente no dispara cambios.
 
-Durante la prueba manual se recibió una actualización real con HTTP 200 y el
-usuario confirmó que probó la actualización. También creó un pedido nuevo en
-Shopify; queda registrar la comprobación de su copia local y del trabajo en
-`done`. HTTP 200 confirma recepción en cola, no el guardado final.
+Durante la prueba manual se verificaron la creación y actualización reales.
+El borrador `#D17`, al confirmarse, generó el pedido `#6506`: se comprobó su
+copia en SQLite y los trabajos `orders/create` y `orders/updated` en `done`.
+HTTP 200 confirma recepción en cola, no el guardado final.
 La introspección de Postman describe el esquema `Order`; no se ha adjuntado una
 respuesta completa de un pedido ficticio que valide todos los campos guardados.
+
+La sincronización local admite únicamente `orders/create` y `orders/updated`.
+No se implementan eliminaciones, marcas locales de eliminación ni tablas de
+borradores y sus líneas. Los comandos de estados pueden consultar borradores en
+Shopify y confirmarlos; el pedido resultante se guarda como `Order` en SQLite.
+Si un pedido se elimina en Shopify, su copia local no se modifica por ese evento.
+
+Si configuraste un webhook de eliminación durante las pruebas, retíralo del panel
+de Shopify y reinicia FastAPI. No necesitas repetir la carga inicial. La retirada
+de esta funcionalidad no limpia columnas ni tablas añadidas previamente a una
+base existente; el código actual no las utiliza ni las crea. Tampoco cambia las
+suscripciones remotas. El consumidor solo procesa avisos de creación y actualización.
 
 ## Requisitos
 
@@ -31,6 +47,35 @@ respuesta completa de un pedido ficticio que valide todos los campos guardados.
 
 No hace falta instalar SQLite por separado ni un visor gráfico. Python incluye
 `sqlite3`; `check_order.py` permite inspeccionar los resultados.
+
+## Organización del código
+
+```text
+app/
+  cli/         Argumentos y ejecución de los comandos de terminal
+  services/    Importación, sincronización, transiciones y lotes
+  shopify/     Cliente GraphQL y exportaciones Bulk
+  storage/     Inicialización y repositorio SQLite
+  config.py    Configuración de entorno
+  paths.py     Rutas ancladas a la raíz del proyecto
+  dates.py     Conversión de fechas compartida
+  webhooks.py  FastAPI, firma de avisos y consumidor de cola
+tests/
+docs/
+schema.sql
+```
+
+Los comandos públicos siguen en la raíz: `init_db.py`, `sync_orders.py`,
+`change_order.py`, `batch_orders.py` y `check_order.py`. Delegan en `app/` y
+conservan sus argumentos. `main.py` expone la aplicación para que siga funcionando
+`python -m uvicorn main:app`. No hace falta instalar el proyecto como paquete.
+
+Mantén `.env` junto a esos comandos y `schema.sql`, en la raíz, no dentro de
+`app/`. Las rutas de configuración y la base por defecto se calculan en
+`app/paths.py` y no dependen de la carpeta desde la que se invoque el script.
+La inicialización SQLite utiliza solo biblioteca estándar; no importa el cliente
+HTTP ni FastAPI. Los datos locales existentes no se mueven ni se reinicializan
+como parte de esta reorganización.
 
 ## Arranque desde una copia limpia
 
@@ -59,7 +104,7 @@ No incluyas credenciales reales en `.env.example` ni en Git.
 | `DATABASE_PATH` | No | `data/shopify.db` junto al proyecto; debe apuntar a un archivo |
 
 `Settings.from_env()` llama a `load_dotenv()` con la ruta absoluta al `.env`
-junto a `config.py`. Uvicorn ejecuta esa carga durante el arranque de FastAPI:
+de la raíz del proyecto, definida por `app/paths.py`. Uvicorn ejecuta esa carga durante el arranque de FastAPI:
 el comando siguiente **sí carga `.env`**, sin necesitar `--env-file`.
 Las variables del entorno tienen prioridad sobre `.env`, incluso si están vacías.
 Si hay varios errores locales, se muestran juntos con instrucciones para corregirlos,
@@ -326,6 +371,18 @@ Repetir el estado actual devuelve éxito sin repetir mutations y refresca SQLite
 si es un `Order`. Se puede reutilizar el GID de un borrador completado: el comando
 resuelve su nuevo pedido antes de validar el paso. `--dry-run` es una consulta
 previa, no reserva el estado ni garantiza que la operación posterior sea aceptada.
+La simulación aplica las mismas validaciones locales que la ejecución, incluido
+el importe positivo del borrador. Tras una escritura, el estado se verifica sobre
+la misma respuesta completa que se guarda en SQLite, sin una segunda lectura de
+estado que pueda contradecir la copia local. Si esa respuesta cambió a otro estado,
+está fuera del flujo o SQLite conserva una versión más reciente, se informa del
+conflicto y el lote no lo exporta como éxito. No evita cambios posteriores de otros
+actores ni constituye una transacción distribuida.
+
+Si una mutation devuelve errores de usuario, el mensaje identifica la operación
+y las rutas de campos reconocidas (por ejemplo `orderMarkAsPaid`, campo `input.id`).
+Se omiten los valores, campos desconocidos y mensajes remotos para no exponer
+datos personales o secretos.
 
 `paymentPending` sigue disponible y se verificó por introspección en la API
 2026-10 de la tienda, pero Shopify lo marca como obsoleto y recomienda usar
@@ -510,7 +567,7 @@ sincronización con la tienda real. En macOS/Linux usa `.venv/bin/python`.
 Las bases locales y los archivos `.env` se excluyen de Git. No guardar tokens ni
 credenciales en el repositorio.
 
-Verificado localmente en Windows con Python 3.13: 88 pruebas, compatibilidad de
+Verificado localmente en Windows con Python 3.13: 102 pruebas, compatibilidad de
 dependencias con `pip check`, creación SQLite y arranque real de Uvicorn en una
 copia temporal de los archivos del proyecto. La prueba de arranque usa `.env`
 con credenciales ficticias y una ruta de base distinta para demostrar su carga;
@@ -531,6 +588,13 @@ escrituras, errores de red ambiguos y recuperación tras fallo de SQLite.
 Los lotes añaden pruebas de selección paginada, filtros compartidos, cambio de GID
 y encadenado de las tres transiciones, fallos parciales, revalidación remota,
 simulación sin escrituras, interrupción con salida parcial y validación de archivos.
+Las regresiones del code review comprueban simulación con importe cero, cambio de
+estado durante el refresco, versión local más reciente, exclusión de esos conflictos
+de los éxitos del lote y diagnóstico de errores sin revelar campos desconocidos.
+Las pruebas de organización ejecutan todos los comandos públicos con `--help`
+desde una copia limpia y otro directorio, inicializan SQLite con `python -S`
+(sin paquetes externos), comprueban la carga de `.env` y códigos de error sin
+red, y mantienen la prueba real de arranque Uvicorn y `/health`.
 
 ## Prueba de aceptación con Shopify (Windows, macOS y Linux)
 

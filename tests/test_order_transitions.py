@@ -4,16 +4,17 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 import httpx
 
-import change_order
-from config import Settings
-from init_db import init_db
-from order_transitions import TransitionError, transition_order
-from repository import connect
-from shopify import ShopifyClient
+from app.cli import change_order
+from app.config import Settings
+from app.storage.database import init_db
+from app.services.transitions import TransitionError, transition_order, mutate, PAY_MUTATION
+from app.storage.repository import connect
+from app.shopify.client import ShopifyClient
 from test_sync import example
 
 
@@ -41,6 +42,7 @@ class Store:
         self.ambiguous_pay = False
         self.fail_refresh = False
         self.keep_pending_after_pay = False
+        self.change_on_snapshot = False
 
     def respond(self, request):
         if request.url.path.endswith("/oauth/access_token"):
@@ -83,7 +85,10 @@ class Store:
             self.order["displayFulfillmentStatus"] = "FULFILLED"
             result = {field: {"fulfillment": {"id": "gid://shopify/Fulfillment/1"}, "userErrors": []}}
         elif "SyncOrder" in query:
+            if self.change_on_snapshot:
+                self.order["displayFinancialStatus"] = "REFUNDED"
             snapshot = example()
+            snapshot.update(self.order)
             snapshot["displayFinancialStatus"] = self.order["displayFinancialStatus"]
             snapshot["displayFulfillmentStatus"] = self.order["displayFulfillmentStatus"]
             snapshot["lineItems"] = {"nodes": snapshot["lineItems"],
@@ -252,7 +257,7 @@ class TransitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()[0]["financial_status"], "PAID")
 
     async def test_sqlite_failure_does_not_claim_remote_rollback(self):
-        with patch("order_transitions.sync_order", side_effect=sqlite3.OperationalError):
+        with patch("app.services.transitions.sync_order_snapshot", side_effect=sqlite3.OperationalError):
             with self.assertRaisesRegex(TransitionError, "no se revierte"):
                 await self.change(ORDER, "PAGADO")
         self.assertEqual(self.store.order["displayFinancialStatus"], "PAID")
@@ -266,11 +271,51 @@ class TransitionTests(unittest.IsolatedAsyncioTestCase):
             await self.change(ORDER, "PAGADO")
         self.assertEqual(self.rows()[0]["financial_status"], "PENDING")
 
+    async def test_dry_run_rejects_zero_amount_like_real_execution(self):
+        self.store.draft["totalPriceSet"]["shopMoney"]["amount"] = "0"
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), self.assertRaisesRegex(TransitionError, "importe positivo"):
+                await self.change(DRAFT, "CONFIRMADO", dry_run=dry_run)
+        self.assertEqual(self.store.mutations, [])
+
+    async def test_verifies_saved_snapshot_and_does_not_claim_paid_after_refund(self):
+        self.store.change_on_snapshot = True
+        with self.assertRaisesRegex(TransitionError, "fuera del flujo"):
+            await self.change(ORDER, "PAGADO")
+        self.assertEqual(self.rows()[0]["financial_status"], "REFUNDED")
+        self.assertEqual(sum("InspectOrderState" in call["query"] for call in self.store.calls), 1)
+
+    async def test_newer_local_copy_does_not_claim_synchronization_success(self):
+        from app.storage.repository import save_order
+        newer = example()
+        newer.update(updatedAt="2026-12-01T00:00:00Z", displayFinancialStatus="REFUNDED")
+        save_order(self.settings.db_path, None, newer)
+        with self.assertRaisesRegex(TransitionError, "versión más reciente"):
+            await self.change(ORDER, "PAGADO")
+        self.assertEqual(self.rows()[0]["financial_status"], "REFUNDED")
+
+    async def test_mutation_error_identifies_operation_and_safe_fields(self):
+        self.store.errors.add("orderMarkAsPaid")
+        with self.assertRaises(TransitionError) as caught:
+            await self.change(ORDER, "PAGADO")
+        self.assertIn("orderMarkAsPaid", str(caught.exception))
+        self.assertIn("Campos: id", str(caught.exception))
+        self.assertNotIn("private-server-detail", str(caught.exception))
+
+    async def test_mutation_error_does_not_echo_unknown_fields_or_messages(self):
+        shopify = SimpleNamespace(graphql=AsyncMock(return_value={"orderMarkAsPaid": {
+            "userErrors": [{"field": ["input", "private-secret"], "message": "private-secret"}],
+        }}))
+        with self.assertRaises(TransitionError) as caught:
+            await mutate(shopify, PAY_MUTATION, {"input": {"id": ORDER}}, "orderMarkAsPaid")
+        self.assertIn("orderMarkAsPaid", str(caught.exception))
+        self.assertNotIn("private-secret", str(caught.exception))
+
     async def test_cli_dry_run_does_not_create_database_and_returns_success(self):
         settings = Settings("prueba.myshopify.com", "fake", "fake", self.settings.db_path.parent / "missing.sqlite")
         client = httpx.AsyncClient(transport=httpx.MockTransport(self.store.respond))
-        with patch("change_order.Settings.from_env", return_value=settings), \
-             patch("change_order.httpx.AsyncClient", return_value=client), patch("builtins.print"):
+        with patch("app.cli.change_order.Settings.from_env", return_value=settings), \
+             patch("app.cli.change_order.httpx.AsyncClient", return_value=client), patch("builtins.print"):
             self.assertEqual(await change_order.run(ORDER, "PAGADO", dry_run=True), 0)
         self.assertFalse(settings.db_path.exists())
         self.assertEqual(self.store.mutations, [])

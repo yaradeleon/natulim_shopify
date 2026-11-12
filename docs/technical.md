@@ -3,7 +3,7 @@
 ## Flujo
 
 `sync_orders.py` carga `.env` con `Settings`, inicializa la base e inicia una
-exportación con `bulkOperationRunQuery` de pedidos y todas sus líneas. `bulk_orders.py`
+exportación con `bulkOperationRunQuery` de pedidos y todas sus líneas. `app/shopify/bulk.py`
 consulta `bulkOperation(id:)` cada cinco segundos hasta `COMPLETED` (límite local de
 una hora). Descarga JSONL sin token Admin API, valida estructura, IDs duplicados,
 relaciones padre/hijo y número de objetos frente a `objectCount`, usando una base
@@ -66,11 +66,19 @@ Una firma incorrecta devuelve 401; dominio distinto, 403; tema/cuerpo inválido,
 
 Un consumidor en el lifespan de FastAPI consulta trabajos pendientes cada segundo.
 Ante fallo, conserva el trabajo y reintenta con espera exponencial de 2 a 60 segundos.
+`enqueue` asigna explícitamente la hora de recepción a `next_attempt`; al fallar,
+se sustituye por la hora prevista del reintento. Entre trabajos disponibles se
+ordena por `next_attempt` y después por `rowid`. Así los avisos posteriores no
+adelantan permanentemente un reintento vencido. La deduplicación conserva su fecha.
+Funciona también con bases cuyo esquema anterior tenía valor por defecto 0,
+porque la inserción proporciona el valor explícitamente; no requiere migración.
+Las bases nuevas usan la hora actual como valor por defecto. Los trabajos antiguos
+con valor 0 permanecen disponibles y se procesan antes que los nuevos.
 No hay máximo de intentos: un error permanente necesita intervención. `last_error`
 almacena solo la clase del error, sin respuestas, cuerpos ni secretos. Una operación
 GraphQL completa tiene un límite de 60 segundos y cada petición HTTP de 15.
 
-La consulta está en `shopify.py`, `ORDER_QUERY`. Recorre todas las páginas de
+La consulta está en `app/shopify/client.py`, `ORDER_QUERY`. Recorre todas las páginas de
 `lineItems` con 100 elementos por página. Rechaza errores GraphQL incluso con datos
 parciales, pedido nulo, versión efectiva distinta si se informa en la cabecera,
 cursores repetidos, líneas duplicadas y cambios de `updatedAt` entre páginas.
@@ -78,7 +86,7 @@ Una respuesta inconsistente se vuelve a intentar desde el principio.
 
 ## Comando de escritura explícita
 
-`change_order.py GID ESTADO [--dry-run]` usa `order_transitions.py` para consultar
+`change_order.py GID ESTADO [--dry-run]` usa `app/services/transitions.py` para consultar
 Shopify y aplicar una transición del flujo `BORRADOR -> CONFIRMADO -> PAGADO ->
 PREPARADO`. `NUEVO`/`ENVIADO` son aliases. Es un flujo propio, independiente de
 `Order.confirmed`; combina tipo de objeto, estado financiero y preparación.
@@ -109,6 +117,29 @@ Un timeout puede ocurrir tras aplicar el cambio; no se reintenta automáticament
 por error de red. El operador consulta primero y vuelve a ejecutar para recuperar
 la copia local. Se recomienda un solo operador por pedido durante la
 prueba. Los permisos de escritura y las restricciones están en el README.
+
+Correcciones del code review: el importe del borrador se valida antes de bifurcar
+entre simulación y escritura. Después de una mutation, `sync_order_snapshot`
+devuelve la respuesta completa y si se guardó; incluye `__typename`, `cancelledAt`
+y `closed` para aplicar las mismas reglas sobre esa respuesta. No hay una lectura
+de estado independiente seguida de otra para guardar. Si el resultado sale del
+flujo, difiere del destino o la escritura fue omitida por una versión local nueva,
+la transición no se considera un éxito. El snapshot se conserva en SQLite cuando
+corresponde, aunque represente un reembolso fuera del flujo simple.
+Los mensajes de errores remotos conservan el nombre de operación y campos de una
+lista permitida, sin imprimir mensajes ni valores arbitrarios de `userErrors`.
+
+## Estructura y puntos de entrada
+
+`app/cli/` contiene la presentación por terminal; `app/services/`, la lógica de
+importación, sincronización y cambios; `app/shopify/`, transporte y Bulk; y
+`app/storage/`, inicialización y persistencia. `app/webhooks.py` contiene FastAPI.
+Los scripts de la raíz conservan las interfaces públicas, incluido `main:app`.
+Las rutas de proyecto están en `app/paths.py`, y las fechas en `app/dates.py`:
+ni configuración ni repositorio necesitan importar un script de terminal o el
+cliente HTTP para resolver rutas/fechas. `schema.sql`, `.env`, `data/` y `lotes/`
+siguen en sus ubicaciones previas. Los tests actualizan sus imports a los módulos
+reales y verifican las entradas públicas en subprocesos con copias temporales.
 
 ## Selección y ejecución de lotes
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from config import ConfigurationError, Settings
+from app.config import ConfigurationError, Settings
 
 
 class ConfigTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
-        project = patch("config.PROJECT_DIR", self.root)
+        project = patch("app.config.PROJECT_DIR", self.root)
         project.start()
         self.addCleanup(project.stop)
 
