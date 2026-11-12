@@ -22,7 +22,8 @@ def enqueue(path, delivery_id, order_id, topic):
     with connect(path) as db:
         cursor = db.execute(
             "INSERT INTO webhook_jobs (delivery_id, order_id, topic, next_attempt) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(delivery_id) DO NOTHING", (delivery_id, order_id, topic, time.time()),
+            "ON CONFLICT(delivery_id) DO NOTHING",
+            (delivery_id, order_id, topic, time.time()),
         )
         return cursor.rowcount == 1
 
@@ -32,7 +33,8 @@ def next_job(path):
         row = db.execute(
             "SELECT * FROM webhook_jobs WHERE status = 'pending' AND next_attempt <= ? "
             "AND topic IN ('orders/create', 'orders/updated') "
-            "ORDER BY next_attempt, rowid LIMIT 1", (time.time(),),
+            "ORDER BY next_attempt, rowid LIMIT 1",
+            (time.time(),),
         ).fetchone()
         return dict(row) if row else None
 
@@ -88,7 +90,8 @@ def save_order(path, job_id, order):
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         existing = db.execute(
-            "SELECT updated_at FROM orders WHERE shopify_order_id = ?", (order["id"],),
+            "SELECT updated_at FROM orders WHERE shopify_order_id = ?",
+            (order["id"],),
         ).fetchone()
         saved = not existing or updated >= parse_date(existing["updated_at"])
         if saved:
@@ -101,16 +104,34 @@ def save_order(path, job_id, order):
                 "note=excluded.note, financial_status=excluded.financial_status, "
                 "fulfillment_status=excluded.fulfillment_status, "
                 "current_total_amount=excluded.current_total_amount, currency_code=excluded.currency_code",
-                (order["id"], order["name"], created.isoformat(), updated.isoformat(), order["note"],
-                 order["displayFinancialStatus"], order["displayFulfillmentStatus"],
-                 money["amount"], money["currencyCode"]),
+                (
+                    order["id"],
+                    order["name"],
+                    created.isoformat(),
+                    updated.isoformat(),
+                    order["note"],
+                    order["displayFinancialStatus"],
+                    order["displayFulfillmentStatus"],
+                    money["amount"],
+                    money["currencyCode"],
+                ),
             )
             # La respuesta ya contiene TODAS las páginas. Reemplazo atómico local.
-            db.execute("DELETE FROM order_line_items WHERE order_id = ?", (order["id"],))
+            db.execute(
+                "DELETE FROM order_line_items WHERE order_id = ?", (order["id"],)
+            )
             db.executemany(
                 "INSERT INTO order_line_items VALUES (?, ?, ?, ?, ?)",
-                [(line["id"], order["id"], line["title"], line["quantity"], line["currentQuantity"])
-                 for line in order["lineItems"]],
+                [
+                    (
+                        line["id"],
+                        order["id"],
+                        line["title"],
+                        line["quantity"],
+                        line["currentQuantity"],
+                    )
+                    for line in order["lineItems"]
+                ],
             )
         if job_id is not None:
             db.execute(

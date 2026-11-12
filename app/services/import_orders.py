@@ -11,8 +11,11 @@ from app.dates import parse_date
 from app.shopify.client import ShopifyError
 from app.shopify.bulk import iter_bulk_orders
 from app.services.sync import sync_order
-from app.storage.repository import save_order, get_sync_checkpoint, advance_sync_checkpoint
-
+from app.storage.repository import (
+    save_order,
+    get_sync_checkpoint,
+    advance_sync_checkpoint,
+)
 
 OVERLAP = timedelta(minutes=5)
 
@@ -25,7 +28,9 @@ class SyncResult:
     listing_failed: bool = False
 
 
-async def import_orders(settings, shopify, report=None, *, bulk=True, incremental=False):
+async def import_orders(
+    settings, shopify, report=None, *, bulk=True, incremental=False
+):
     if report is None:
         report = print
     result = SyncResult()
@@ -33,25 +38,37 @@ async def import_orders(settings, shopify, report=None, *, bulk=True, incrementa
         # Inicio, nunca fin: los cambios durante la descarga deben entrar en la
         # siguiente ejecución. Redondear hacia abajo mantiene el límite inclusivo.
         started_at = datetime.now(timezone.utc).replace(microsecond=0)
-        checkpoint = get_sync_checkpoint(settings.db_path, settings.shop_domain) if bulk else None
+        checkpoint = (
+            get_sync_checkpoint(settings.db_path, settings.shop_domain)
+            if bulk
+            else None
+        )
         since = None
         if checkpoint is not None and parse_date(checkpoint) > started_at:
-            raise ShopifyError("Fecha de control futura; comprueba el reloj del sistema")
+            raise ShopifyError(
+                "Fecha de control futura; comprueba el reloj del sistema"
+            )
         if incremental:
             if not bulk:
                 raise ShopifyError("La carga incremental requiere Bulk")
             if checkpoint is None:
-                report("No hay fecha de control. Ejecuta primero sync_orders.py sin --incremental "
-                       "para completar una carga Bulk y establecerla; no se inicia otra carga automáticamente.")
+                report(
+                    "No hay fecha de control. Ejecuta primero sync_orders.py sin --incremental "
+                    "para completar una carga Bulk y establecerla; no se inicia otra carga automáticamente."
+                )
                 raise ShopifyError("Falta una carga completa correcta")
             since = parse_date(checkpoint) - OVERLAP
-            report(f"Carga incremental por updated_at: desde {since.isoformat()} "
-                   f"hasta {started_at.isoformat()} (solapamiento: 5 minutos).")
+            report(
+                f"Carga incremental por updated_at: desde {since.isoformat()} "
+                f"hasta {started_at.isoformat()} (solapamiento: 5 minutos)."
+            )
 
         async def snapshots():
             if bulk:
                 async for order in iter_bulk_orders(
-                    shopify, report, updated_since=since,
+                    shopify,
+                    report,
+                    updated_since=since,
                     updated_before=started_at if incremental else None,
                 ):
                     yield order["id"], order
@@ -61,37 +78,71 @@ async def import_orders(settings, shopify, report=None, *, bulk=True, incrementa
 
         async for order_id, order in snapshots():
             try:
-                saved = (save_order(settings.db_path, None, order) if bulk
-                         else await sync_order(shopify, settings.db_path, order_id))
-            except (ShopifyError, httpx.HTTPError, sqlite3.Error, ValueError, KeyError,
-                    TypeError, AttributeError, InvalidOperation) as exc:
+                saved = (
+                    save_order(settings.db_path, None, order)
+                    if bulk
+                    else await sync_order(shopify, settings.db_path, order_id)
+                )
+            except (
+                ShopifyError,
+                httpx.HTTPError,
+                sqlite3.Error,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                InvalidOperation,
+            ) as exc:
                 result.failed += 1
                 # Nunca imprimir la respuesta ni la excepción: podrían contener secretos.
-                report(f"No se guardó {order_id}; causa={type(exc).__name__}. Copia local conservada.")
+                report(
+                    f"No se guardó {order_id}; causa={type(exc).__name__}. Copia local conservada."
+                )
                 continue
             if saved:
                 result.saved += 1
             else:
                 result.skipped += 1
             if (result.saved + result.skipped + result.failed) % 100 == 0:
-                report(f"Progreso: {result.saved} guardados; {result.skipped} omitidos; {result.failed} fallidos.")
+                report(
+                    f"Progreso: {result.saved} guardados; {result.skipped} omitidos; {result.failed} fallidos."
+                )
         if bulk and not result.failed:
             advanced = advance_sync_checkpoint(
-                settings.db_path, settings.shop_domain, checkpoint, started_at.isoformat(),
+                settings.db_path,
+                settings.shop_domain,
+                checkpoint,
+                started_at.isoformat(),
             )
             if advanced:
                 report(f"Fecha de control guardada: {started_at.isoformat()}.")
             else:
-                report("Otra carga actualizó la fecha de control; se conserva su valor. "
-                       "Puedes repetir --incremental para comprobar el intervalo restante.")
+                report(
+                    "Otra carga actualizó la fecha de control; se conserva su valor. "
+                    "Puedes repetir --incremental para comprobar el intervalo restante."
+                )
         elif bulk:
-            report("Fecha de control conservada por fallos; repite la carga para recuperarlos.")
-    except (ShopifyError, httpx.HTTPError, ValueError, KeyError, TypeError,
-            AttributeError, sqlite3.Error, OSError) as exc:
+            report(
+                "Fecha de control conservada por fallos; repite la carga para recuperarlos."
+            )
+    except (
+        ShopifyError,
+        httpx.HTTPError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        sqlite3.Error,
+        OSError,
+    ) as exc:
         result.listing_failed = True
-        report(f"Carga interrumpida; causa={type(exc).__name__}. "
-               "La fecha de control no se avanza. Vuelve a ejecutar la carga.")
-    report(f"Pedidos guardados: {result.saved}; omitidos por versión local más reciente: "
-           f"{result.skipped}; pedidos fallidos: {result.failed}; "
-           f"fallos de listado: {int(result.listing_failed)}.")
+        report(
+            f"Carga interrumpida; causa={type(exc).__name__}. "
+            "La fecha de control no se avanza. Vuelve a ejecutar la carga."
+        )
+    report(
+        f"Pedidos guardados: {result.saved}; omitidos por versión local más reciente: "
+        f"{result.skipped}; pedidos fallidos: {result.failed}; "
+        f"fallos de listado: {int(result.listing_failed)}."
+    )
     return result

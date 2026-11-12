@@ -11,7 +11,9 @@ from app.storage.database import init_db
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--db", type=Path, default=DEFAULT_DB_PATH,
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
         help="Ruta SQLite alternativa (por defecto: data/shopify.db junto al script).",
     )
     args = parser.parse_args()

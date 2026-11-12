@@ -17,7 +17,6 @@ from app.storage.repository import enqueue, next_job, retry_job
 from app.shopify.client import ShopifyClient
 from app.services.sync import sync_order
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -26,9 +25,15 @@ async def process_one(settings, shopify):
     if not job:
         return False
     try:
-        await asyncio.wait_for(sync_order(
-            shopify, settings.db_path, job["order_id"], job["delivery_id"],
-        ), timeout=60)
+        await asyncio.wait_for(
+            sync_order(
+                shopify,
+                settings.db_path,
+                job["order_id"],
+                job["delivery_id"],
+            ),
+            timeout=60,
+        )
     except Exception as exc:
         # Solo la clase: no registrar cuerpos de pedidos, tokens ni respuestas.
         code = type(exc).__name__
@@ -59,7 +64,9 @@ def create_app(settings=None, shopify_client=None, start_worker=True):
         app.state.settings = config
         async with httpx.AsyncClient(timeout=15) as client:
             shopify = shopify_client or ShopifyClient(config, client)
-            task = asyncio.create_task(worker(config, shopify)) if start_worker else None
+            task = (
+                asyncio.create_task(worker(config, shopify)) if start_worker else None
+            )
             try:
                 yield
             finally:
@@ -80,13 +87,20 @@ def create_app(settings=None, shopify_client=None, start_worker=True):
     async def orders_webhook(request: Request):
         config = request.app.state.settings
         body = await request.body()
-        expected = base64.b64encode(hmac.new(
-            config.signing_secret.encode(), body, hashlib.sha256,
-        ).digest()).decode("ascii")
+        expected = base64.b64encode(
+            hmac.new(
+                config.signing_secret.encode(),
+                body,
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii")
         supplied = request.headers.get("X-Shopify-Hmac-Sha256", "")
         if not hmac.compare_digest(expected.encode(), supplied.encode()):
             raise HTTPException(401, "Firma inválida")
-        if request.headers.get("X-Shopify-Shop-Domain", "").lower() != config.shop_domain:
+        if (
+            request.headers.get("X-Shopify-Shop-Domain", "").lower()
+            != config.shop_domain
+        ):
             raise HTTPException(403, "Tienda no autorizada")
         topic = request.headers.get("X-Shopify-Topic", "")
         if topic not in {"orders/create", "orders/updated"}:
@@ -105,10 +119,14 @@ def create_app(settings=None, shopify_client=None, start_worker=True):
             order_id = payload.get("admin_graphql_api_id")
             if not order_id:
                 numeric = payload.get("id")
-                if isinstance(numeric, bool) or not re.fullmatch(r"[1-9]\d*", str(numeric)):
+                if isinstance(numeric, bool) or not re.fullmatch(
+                    r"[1-9]\d*", str(numeric)
+                ):
                     raise ValueError()
                 order_id = f"gid://shopify/Order/{numeric}"
-            if not isinstance(order_id, str) or not re.fullmatch(r"gid://shopify/Order/[1-9]\d*", order_id):
+            if not isinstance(order_id, str) or not re.fullmatch(
+                r"gid://shopify/Order/[1-9]\d*", order_id
+            ):
                 raise ValueError()
         except (ValueError, AttributeError, UnicodeDecodeError):
             raise HTTPException(400, "JSON o identificador de pedido inválido")

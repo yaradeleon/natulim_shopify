@@ -48,29 +48,47 @@ class ConfigTests(unittest.TestCase):
 
     def test_all_errors_in_one_message_without_secret_values(self):
         self.write_env("SHOPIFY_API_VERSION=incorrecta\nDATABASE_PATH=\n")
-        os.environ.update({
-            "SHOPIFY_SHOP_DOMAIN": "https://incorrecto.example",
-            "SHOPIFY_CLIENT_ID": "REEMPLAZAR_AQUI",
-            "SHOPIFY_CLIENT_SECRET": "",
-        })
+        os.environ.update(
+            {
+                "SHOPIFY_SHOP_DOMAIN": "https://incorrecto.example",
+                "SHOPIFY_CLIENT_ID": "REEMPLAZAR_AQUI",
+                "SHOPIFY_CLIENT_SECRET": "",
+            }
+        )
         with self.assertRaises(ConfigurationError) as caught:
             Settings.from_env()
         message = str(caught.exception)
-        for name in ("SHOPIFY_SHOP_DOMAIN", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET",
-                     "SHOPIFY_API_VERSION", "DATABASE_PATH"):
+        for name in (
+            "SHOPIFY_SHOP_DOMAIN",
+            "SHOPIFY_CLIENT_ID",
+            "SHOPIFY_CLIENT_SECRET",
+            "SHOPIFY_API_VERSION",
+            "DATABASE_PATH",
+        ):
             self.assertIn(name, message)
-        for value in ("token-ficticio", "secreto-ficticio", "https://incorrecto.example", "REEMPLAZAR_AQUI"):
+        for value in (
+            "token-ficticio",
+            "secreto-ficticio",
+            "https://incorrecto.example",
+            "REEMPLAZAR_AQUI",
+        ):
             self.assertNotIn(value, message)
 
     def test_missing_required_variables(self):
         with self.assertRaises(ConfigurationError) as caught:
             Settings.from_env()
-        for name in ("SHOPIFY_SHOP_DOMAIN", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET"):
+        for name in (
+            "SHOPIFY_SHOP_DOMAIN",
+            "SHOPIFY_CLIENT_ID",
+            "SHOPIFY_CLIENT_SECRET",
+        ):
             self.assertIn(name, str(caught.exception))
 
     def test_database_path_is_project_relative(self):
         self.write_env("DATABASE_PATH=data/reviewer.db\n")
-        self.assertEqual(Settings.from_env().db_path, self.root / "data" / "reviewer.db")
+        self.assertEqual(
+            Settings.from_env().db_path, self.root / "data" / "reviewer.db"
+        )
 
     def test_directory_and_invalid_parent_are_rejected(self):
         self.write_env()

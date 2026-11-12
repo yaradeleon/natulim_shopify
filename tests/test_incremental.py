@@ -14,13 +14,15 @@ from app.shopify.bulk import build_bulk_query
 from app.config import Settings
 from app.storage.database import init_db
 from app.storage.repository import (
-    advance_sync_checkpoint, connect, get_sync_checkpoint, save_order,
+    advance_sync_checkpoint,
+    connect,
+    get_sync_checkpoint,
+    save_order,
 )
 from app.shopify.client import ShopifyClient
 from app.services.import_orders import import_orders
 from app.cli.sync_orders import run
 from test_sync import example
-
 
 BASELINE = "2026-11-12T10:00:00+00:00"
 NEXT_RUN = "2026-11-12T10:20:00+00:00"
@@ -30,8 +32,12 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.settings = Settings("prueba.myshopify.com", "fake", "fake",
-                                 Path(directory.name) / "orders.sqlite")
+        self.settings = Settings(
+            "prueba.myshopify.com",
+            "fake",
+            "fake",
+            Path(directory.name) / "orders.sqlite",
+        )
         init_db(self.settings.db_path)
 
     def checkpoint(self):
@@ -39,11 +45,21 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
 
     def seed(self):
         save_order(self.settings.db_path, None, example())
-        advance_sync_checkpoint(self.settings.db_path, self.settings.shop_domain, None, BASELINE)
+        advance_sync_checkpoint(
+            self.settings.db_path, self.settings.shop_domain, None, BASELINE
+        )
 
-    async def export(self, orders=(), *, now=NEXT_RUN, incremental=True,
-                     status="COMPLETED", truncated=False, concurrent_checkpoint=None,
-                     cancel=False):
+    async def export(
+        self,
+        orders=(),
+        *,
+        now=NEXT_RUN,
+        incremental=True,
+        status="COMPLETED",
+        truncated=False,
+        concurrent_checkpoint=None,
+        cancel=False,
+    ):
         rows = []
         for snapshot in orders:
             order = copy.deepcopy(snapshot)
@@ -60,30 +76,54 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
                     raise asyncio.CancelledError()
                 return httpx.Response(200, text=content)
             if request.url.path.endswith("/oauth/access_token"):
-                return httpx.Response(200, json={"access_token": "fake", "expires_in": 3600})
+                return httpx.Response(
+                    200, json={"access_token": "fake", "expires_in": 3600}
+                )
             payload = json.loads(request.content)
             if "StartOrderExport" in payload["query"]:
                 if concurrent_checkpoint:
                     advance_sync_checkpoint(
-                        self.settings.db_path, self.settings.shop_domain,
-                        self.checkpoint(), concurrent_checkpoint,
+                        self.settings.db_path,
+                        self.settings.shop_domain,
+                        self.checkpoint(),
+                        concurrent_checkpoint,
                     )
-                return httpx.Response(200, json={"data": {"bulkOperationRunQuery": {
-                    "bulkOperation": {"id": "gid://shopify/BulkOperation/1"}, "userErrors": [],
-                }}})
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": {
+                            "bulkOperationRunQuery": {
+                                "bulkOperation": {
+                                    "id": "gid://shopify/BulkOperation/1"
+                                },
+                                "userErrors": [],
+                            }
+                        }
+                    },
+                )
             if "OrderExportStatus" not in payload["query"]:
                 raise AssertionError("No debe consultar pedidos individualmente")
-            return httpx.Response(200, json={"data": {"bulkOperation": {
-                "status": status, "objectCount": str(len(rows)),
-                "url": "https://example.com/export" if rows else None,
-            }}})
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "bulkOperation": {
+                            "status": status,
+                            "objectCount": str(len(rows)),
+                            "url": "https://example.com/export" if rows else None,
+                        }
+                    }
+                },
+            )
 
         messages = []
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             with patch("app.services.import_orders.datetime") as clock:
                 clock.now.return_value = datetime.fromisoformat(now)
                 result = await import_orders(
-                    self.settings, ShopifyClient(self.settings, client), messages.append,
+                    self.settings,
+                    ShopifyClient(self.settings, client),
+                    messages.append,
                     incremental=incremental,
                 )
         return result, requests, messages
@@ -102,7 +142,9 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("updated_at:", query)
 
     async def test_missing_checkpoint_fails_fast_without_network_or_full_reload(self):
-        save_order(self.settings.db_path, None, example())  # Base anterior con pedidos, sin marcador.
+        save_order(
+            self.settings.db_path, None, example()
+        )  # Base anterior con pedidos, sin marcador.
         result, requests, messages = await self.export()
         self.assertTrue(result.listing_failed)
         self.assertEqual(requests, [])
@@ -127,19 +169,27 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.order()["note"], "Cambio sin webhook")
         self.assertEqual(self.checkpoint(), NEXT_RUN)
         with connect(self.settings.db_path) as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM order_line_items").fetchone()[0], 301)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0], 0)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM order_line_items").fetchone()[0], 301
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM webhook_jobs").fetchone()[0], 0
+            )
 
     async def test_overlap_repeated_export_does_not_duplicate(self):
         self.seed()
         await self.export([example()])
-        result, requests, _ = await self.export([example()], now="2026-11-12T10:30:00+00:00")
+        result, requests, _ = await self.export(
+            [example()], now="2026-11-12T10:30:00+00:00"
+        )
         self.assertEqual(result.saved, 1)
         query = json.loads(requests[1].content)["variables"]["query"]
         self.assertIn("updated_at:>='2026-11-12T10:15:00Z'", query)
         with connect(self.settings.db_path) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 1)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM order_line_items").fetchone()[0], 1)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM order_line_items").fetchone()[0], 1
+            )
 
     async def test_empty_interval_advances_checkpoint(self):
         self.seed()
@@ -183,7 +233,10 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checkpoint_write_failure_returns_error_for_retry(self):
         self.seed()
-        with patch("app.services.import_orders.advance_sync_checkpoint", side_effect=sqlite3.OperationalError):
+        with patch(
+            "app.services.import_orders.advance_sync_checkpoint",
+            side_effect=sqlite3.OperationalError,
+        ):
             result, _, _ = await self.export()
         self.assertTrue(result.listing_failed)
         self.assertEqual(self.checkpoint(), BASELINE)
@@ -219,8 +272,10 @@ class IncrementalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_sync_checkpoint(other.db_path, other.shop_domain))
 
     async def test_command_uses_incremental_option_and_returns_failure(self):
-        with patch("app.cli.sync_orders.Settings.from_env", return_value=self.settings), \
-             patch("builtins.print"):
+        with (
+            patch("app.cli.sync_orders.Settings.from_env", return_value=self.settings),
+            patch("builtins.print"),
+        ):
             self.assertEqual(await run(incremental=True), 1)
 
     def test_filter_normalizes_timezone_and_rejects_naive_date(self):

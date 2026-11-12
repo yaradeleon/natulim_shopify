@@ -20,22 +20,29 @@ async def run(*, incremental=False):
         print(str(exc))
         return 1
     except (OSError, sqlite3.Error):
-        print("No se pudo inicializar SQLite; comprueba DATABASE_PATH y los permisos de escritura.")
+        print(
+            "No se pudo inicializar SQLite; comprueba DATABASE_PATH y los permisos de escritura."
+        )
         return 1
     async with httpx.AsyncClient(timeout=15) as client:
-        result = await import_orders(settings, ShopifyClient(settings, client), incremental=incremental)
+        result = await import_orders(
+            settings, ShopifyClient(settings, client), incremental=incremental
+        )
     return int(bool(result.failed or result.listing_failed))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--incremental", action="store_true",
+        "--incremental",
+        action="store_true",
         help="Exporta solo pedidos modificados desde la última carga correcta (con 5 minutos de solapamiento).",
     )
     args = parser.parse_args()
     try:
         raise SystemExit(asyncio.run(run(incremental=args.incremental)))
     except KeyboardInterrupt:
-        print("Carga interrumpida; los pedidos ya confirmados se conservan. Puedes repetirla.")
+        print(
+            "Carga interrumpida; los pedidos ya confirmados se conservan. Puedes repetirla."
+        )
         raise SystemExit(130)

@@ -6,7 +6,6 @@ import httpx
 
 from app.dates import parse_date
 
-
 ORDER_QUERY = """
 query SyncOrder($id: ID!, $after: String) {
   order(id: $id) {
@@ -51,30 +50,45 @@ class ShopifyClient:
             try:
                 response = await self.client.post(
                     f"https://{self.settings.shop_domain}/admin/oauth/access_token",
-                    data={"grant_type": "client_credentials", "client_id": self.settings.client_id,
-                          "client_secret": self.settings.client_secret},
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": self.settings.client_id,
+                        "client_secret": self.settings.client_secret,
+                    },
                 )
                 if response.status_code != 200:
-                    raise ShopifyError(f"Solicitud de token: HTTP {response.status_code}; comprueba app, tienda y credenciales")
+                    raise ShopifyError(
+                        f"Solicitud de token: HTTP {response.status_code}; comprueba app, tienda y credenciales"
+                    )
                 payload = response.json()
                 token = payload["access_token"]
                 expires_in = float(payload["expires_in"])
-                if not isinstance(token, str) or not token or not math.isfinite(expires_in) or expires_in <= 0:
+                if (
+                    not isinstance(token, str)
+                    or not token
+                    or not math.isfinite(expires_in)
+                    or expires_in <= 0
+                ):
                     raise ValueError()
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                raise ShopifyError("No se pudo obtener un token válido de Shopify") from None
+                raise ShopifyError(
+                    "No se pudo obtener un token válido de Shopify"
+                ) from None
             self._token = token
             self._refresh_at = started + expires_in - min(60, expires_in * 0.1)
             return token
 
     async def graphql(self, query, variables):
-        url = (f"https://{self.settings.shop_domain}/admin/api/"
-               f"{self.settings.api_version}/graphql.json")
+        url = (
+            f"https://{self.settings.shop_domain}/admin/api/"
+            f"{self.settings.api_version}/graphql.json"
+        )
         for attempt in range(2):
             token = await self.get_token()
             try:
                 response = await self.client.post(
-                    url, headers={"X-Shopify-Access-Token": token},
+                    url,
+                    headers={"X-Shopify-Access-Token": token},
                     json={"query": query, "variables": variables},
                 )
             except httpx.HTTPError:
@@ -90,7 +104,9 @@ class ShopifyClient:
             try:
                 payload = response.json()
                 if payload.get("errors"):
-                    raise ShopifyError("Shopify devolvió errores GraphQL; comprueba permisos o límites de consulta")
+                    raise ShopifyError(
+                        "Shopify devolvió errores GraphQL; comprueba permisos o límites de consulta"
+                    )
                 data = payload["data"]
                 if not isinstance(data, dict):
                     raise ValueError()
@@ -109,12 +125,16 @@ class ShopifyClient:
                 page = connection["pageInfo"]
                 more = page["hasNextPage"]
                 cursor = page["endCursor"]
-                if not isinstance(more, bool) or any(not isinstance(gid, str) for gid in ids):
+                if not isinstance(more, bool) or any(
+                    not isinstance(gid, str) for gid in ids
+                ):
                     raise ValueError()
                 if more and (not cursor or cursor in seen):
                     raise ValueError()
             except (ValueError, KeyError, TypeError):
-                raise ShopifyError("Página de pedidos incompleta o cursor inválido") from None
+                raise ShopifyError(
+                    "Página de pedidos incompleta o cursor inválido"
+                ) from None
             for order_id in ids:
                 yield order_id
             if not more:
@@ -132,7 +152,9 @@ class ShopifyClient:
             order = data.get("order")
             if not order or order["id"] != order_id:
                 raise ShopifyError("Pedido no disponible")
-            if snapshot and parse_date(snapshot["updatedAt"]) != parse_date(order["updatedAt"]):
+            if snapshot and parse_date(snapshot["updatedAt"]) != parse_date(
+                order["updatedAt"]
+            ):
                 raise ShopifyError("El pedido cambió durante la paginación")
             snapshot = order
             connection = order["lineItems"]

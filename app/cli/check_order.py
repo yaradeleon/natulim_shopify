@@ -23,7 +23,9 @@ def main():
     name = identifier if identifier.startswith("#") else f"#{identifier}"
     try:
         # mode=ro evita crear una base vacía o modificar la existente.
-        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        with closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as db:
             db.row_factory = sqlite3.Row
             order = db.execute(
                 "SELECT shopify_order_id, name, created_at, updated_at, note, financial_status, "
@@ -43,8 +45,10 @@ def main():
                 (order["shopify_order_id"],),
             ).fetchall()
             for line in lines:
-                print(f"{line['title']} | quantity={line['quantity']} | "
-                      f"currentQuantity={line['current_quantity']} | {line['shopify_line_item_id']}")
+                print(
+                    f"{line['title']} | quantity={line['quantity']} | "
+                    f"currentQuantity={line['current_quantity']} | {line['shopify_line_item_id']}"
+                )
             if not lines:
                 print("Sin líneas.")
             print("\nÚLTIMOS WEBHOOKS DEL PEDIDO")
@@ -54,12 +58,18 @@ def main():
                 (order["shopify_order_id"],),
             ).fetchall()
             for job in jobs:
-                print(f"{job['topic']} | {job['status']} | intentos fallidos={job['attempts']} | "
-                      f"error={job['last_error'] or '-'}")
+                print(
+                    f"{job['topic']} | {job['status']} | intentos fallidos={job['attempts']} | "
+                    f"error={job['last_error'] or '-'}"
+                )
             if not jobs:
-                print("Sin avisos registrados; puede haberse importado mediante la carga inicial.")
+                print(
+                    "Sin avisos registrados; puede haberse importado mediante la carga inicial."
+                )
     except (sqlite3.Error, OSError, ValueError):
-        print("No se pudo consultar SQLite. Comprueba DATABASE_PATH y ejecuta primero la inicialización.")
+        print(
+            "No se pudo consultar SQLite. Comprueba DATABASE_PATH y ejecuta primero la inicialización."
+        )
         return 1
     return 0
 
