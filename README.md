@@ -148,6 +148,13 @@ Es manual: no existe una tarea programada ni recupera eliminaciones.
    Sustituye `https://TU-TUNEL` por el dominio completo activo. Comprueba el secreto
    en `.env` y reinicia FastAPI si lo has cambiado.
 
+El webhook seleccionado para la creación, `orders/create`, solo contempla pedidos
+(`Order`), no pedidos preliminares o borradores (`DraftOrder`). Crear un pedido
+preliminar en Shopify no dispara este evento ni lo guarda en la base de datos
+local. Cuando el preliminar se convierte en pedido, Shopify emite `orders/create`;
+al procesar ese aviso, la integración consulta el pedido y lo crea en SQLite.
+Los cambios posteriores del pedido se reciben mediante `orders/updated`.
+
 Ambas rutas comparten el receptor: valida firma, tienda y tema, guarda la entrega
 en una cola y devuelve HTTP 200. Después, un consumidor consulta el pedido actual
 en Shopify y guarda sus datos y todas sus líneas en SQLite. Si falla, reintenta
